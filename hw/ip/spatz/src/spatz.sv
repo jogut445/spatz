@@ -239,7 +239,8 @@ module spatz import spatz_pkg::*; import rvv_pkg::*; import fpnew_pkg::*; #(
   spatz_vrf #(
     .NrReadPorts (NrReadPorts ),
     .NrWritePorts(NrWritePorts),
-    .FpuBufDepth (FpuBufDepth )
+    .FpuBufDepth (FpuBufDepth ),
+    .SIMD        (1'b0        )   // standard Spatz: disable SIMD WAR tracking
   ) i_vrf (
     .clk_i           (clk_i         ),
     .rst_ni          (rst_ni        ),
@@ -256,6 +257,8 @@ module spatz import spatz_pkg::*; import rvv_pkg::*; import fpnew_pkg::*; #(
     // Read Ports
     .raddr_i         (vrf_raddr     ),
     .re_i            (vrf_re        ),
+    .re_first_i      ('0            ),  // unused in standard Spatz
+    .loop_state_i    (LoopRegular   ),  // unused in standard Spatz
     .rdata_o         (vrf_rdata     ),
     .rvalid_o        (vrf_rvalid    )
   );

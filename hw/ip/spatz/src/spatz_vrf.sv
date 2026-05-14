@@ -8,10 +8,17 @@
 
 module spatz_vrf
   import spatz_pkg::*;
+  import schnizo_pkg::*;
   #(
     parameter int unsigned NrReadPorts  = 5,
     parameter int unsigned NrWritePorts = 3,
-    parameter int unsigned FpuBufDepth  = 4
+    parameter int unsigned FpuBufDepth  = 4,
+    // WAR hazard tracking parameters
+    parameter int unsigned NofVLSU    = 0,
+    parameter int unsigned NofVFU     = 0,
+    parameter int unsigned VlsuNofRss = 0,
+    parameter int unsigned VfuNofRss  = 0,
+    parameter bit SIMD = 1'b0
   ) (
     input  logic                         clk_i,
     input  logic                         rst_ni,
@@ -22,6 +29,8 @@ module spatz_vrf
     input  logic      [NrWritePorts-1:0] we_i,
     input  vrf_be_t   [NrWritePorts-1:0] wbe_i,
     output logic      [NrWritePorts-1:0] wvalid_o,
+    // Loop state for WAR hazard tracking
+    input  loop_state_e                  loop_state_i,
 `ifdef BUF_FPU
     // Signal to track if  result can be buffered or not
     input  logic      [$clog2(FpuBufDepth)-1:0] fpu_buf_usage_i,
@@ -29,6 +38,8 @@ module spatz_vrf
     // Read ports
     input  vrf_addr_t [NrReadPorts-1:0]  raddr_i,
     input  logic      [NrReadPorts-1:0]  re_i,
+    // First beat of a new read transaction per port (see WAR tracking comment below)
+    input  logic      [NrReadPorts-1:0]  re_first_i,
     output vrf_data_t [NrReadPorts-1:0]  rdata_o,
     output logic      [NrReadPorts-1:0]  rvalid_o
   );
@@ -40,6 +51,11 @@ module spatz_vrf
   ////////////////
 
   localparam int unsigned NrReadPortsPerBank = 3;
+
+  // WAR hazard tracking
+  localparam int unsigned MaxConsumers = VlsuNofRss * NofVLSU + VfuNofRss * NofVFU;
+  localparam int unsigned CntW         = $clog2(MaxConsumers + 1);
+  localparam int unsigned ReadCntW     = $clog2(NrReadPorts + 1);
 
   //////////////
   // Typedefs //
@@ -83,15 +99,38 @@ module spatz_vrf
   vregfile_addr_t [NrVRFBanks-1:0][NrReadPortsPerBank-1:0] raddr;
   vrf_data_t      [NrVRFBanks-1:0][NrReadPortsPerBank-1:0] rdata;
 
+  // WAR hazard tracking state (per VRF register address).
+  // Declared in outer scope because gen_lep_write_blocked references them;
+  // driven by FFs inside gen_simd_war_tracking or tied to 0 in the else branch.
+  logic                          [NrVRFWords-1:0] tracking_active_q;
+  logic [NrVRFWords-1:0][CntW-1:0]               consumer_count_q;
+  logic [NrVRFWords-1:0][CntW-1:0]               consumed_by_q;
+  logic                          [NrVRFWords-1:0] consumed_by_frozen_q;
+  // Write-blocked mask for LEP gating (combinational)
+  logic [NrWritePorts-1:0]                        lep_write_blocked;
+
   ///////////////////
   // Write Mapping //
   ///////////////////
+
+  // In LEP: block writes to tracked registers that still have pending consumers.
+  // Only active in SIMD mode; in standard Spatz always 0.
+  always_comb begin : gen_lep_write_blocked
+    lep_write_blocked = '0;
+    if (SIMD && loop_state_i == LoopLep) begin
+      for (int p = 0; p < NrWritePorts; p++) begin
+        if (we_i[p] && tracking_active_q[waddr_i[p]] && (consumed_by_q[waddr_i[p]] != '0))
+          lep_write_blocked[p] = 1'b1;
+      end
+    end
+  end : gen_lep_write_blocked
 
   logic [NrVRFBanks-1:0][NrWritePorts-1:0] write_request;
   always_comb begin: gen_write_request
     for (int bank = 0; bank < NrVRFBanks; bank++) begin
       for (int port = 0; port < NrWritePorts; port++) begin
-        write_request[bank][port] = we_i[port] && f_bank(waddr_i[port]) == bank;
+        write_request[bank][port] = we_i[port] && !lep_write_blocked[port]
+                                    && f_bank(waddr_i[port]) == bank;
       end
     end
   end: gen_write_request
@@ -313,6 +352,142 @@ module spatz_vrf
 `endif
     end
   end
+
+  ///////////////////////
+  // WAR Hazard Tracking
+  ///////////////////////
+  // Active only when SIMD=1 (Schnizo); in standard Spatz all tracking state is 0.
+
+  if (SIMD) begin : gen_simd_war_tracking
+
+    // Registered rvalid/raddr to detect the last beat of each read transaction.
+    // last_read[p] fires the cycle AFTER the final beat: when re_first_i signals a new
+    // dispatch (back-to-back reads, re never drops) or when re_i simply falls.
+    logic      [NrReadPorts-1:0] rvalid_q;
+    vrf_addr_t [NrReadPorts-1:0] raddr_q;
+    logic      [NrReadPorts-1:0] last_read;
+    // Per-address last-beat count (combinational, counted one cycle late)
+    logic [NrVRFWords-1:0][ReadCntW-1:0] rvalid_per_addr;
+
+    logic [NrVRFWords-1:0]           tracking_active_d;
+    logic [NrVRFWords-1:0][CntW-1:0] consumer_count_d;
+    logic [NrVRFWords-1:0][CntW-1:0] consumed_by_d;
+    logic [NrVRFWords-1:0]           consumed_by_frozen_d;
+
+    // Detect last beat of each read transaction:
+    //   - re_i drops (normal end of read)
+    //   - re_first_i asserted while re was high (new dispatch arrived, back-to-back reads)
+    always_comb begin : gen_last_read
+      for (int p = 0; p < NrReadPorts; p++)
+        last_read[p] = rvalid_q[p] & (~re_i[p] | re_first_i[p]);
+    end : gen_last_read
+
+    // Count one read per register address at the last beat only, using registered address.
+    always_comb begin : gen_rvalid_per_addr
+      rvalid_per_addr = '0;
+      for (int p = 0; p < NrReadPorts; p++) begin
+        if (last_read[p])
+          rvalid_per_addr[raddr_q[p]] = rvalid_per_addr[raddr_q[p]] + ReadCntW'(1);
+      end
+    end : gen_rvalid_per_addr
+
+    always_comb begin : proc_war_tracking
+      tracking_active_d    = tracking_active_q;
+      consumer_count_d     = consumer_count_q;
+      consumed_by_d        = consumed_by_q;
+      consumed_by_frozen_d = consumed_by_frozen_q;
+
+      // Reset all tracking state when returning to non-LxP execution
+      if (loop_state_i inside {LoopRegular, LoopHwLoop}) begin
+        tracking_active_d    = '0;
+        consumer_count_d     = '0;
+        consumed_by_d        = '0;
+        consumed_by_frozen_d = '0;
+      end else begin
+
+        // ---- LCP1: start tracking on first write ----
+        if (loop_state_i == LoopLcp1) begin
+          for (int p = 0; p < NrWritePorts; p++) begin
+            if (wvalid_o[p]) begin
+              automatic int unsigned r = unsigned'(waddr_i[p]);
+              if (!tracking_active_q[r]) begin
+                tracking_active_d[r]    = 1'b1;
+                consumer_count_d[r]     = '0;
+                consumed_by_frozen_d[r] = 1'b0;
+              end
+            end
+          end
+
+          // Count reads to tracked registers (consumer count per loop body pass)
+          for (int r = 0; r < NrVRFWords; r++) begin
+            if (tracking_active_q[r] && !consumed_by_frozen_q[r] && rvalid_per_addr[r] != '0)
+              consumer_count_d[r] = consumer_count_q[r] + CntW'(rvalid_per_addr[r]);
+          end
+        end
+
+        // ---- LCP2: freeze consumer_count on first write, then count down consumed_by on reads ----
+        if (loop_state_i == LoopLcp2) begin
+          for (int p = 0; p < NrWritePorts; p++) begin
+            if (wvalid_o[p]) begin
+              automatic int unsigned r = unsigned'(waddr_i[p]);
+              if (tracking_active_q[r] && !consumed_by_frozen_q[r]) begin
+                consumed_by_d[r]        = consumer_count_q[r];
+                consumed_by_frozen_d[r] = 1'b1;
+              end
+            end
+          end
+
+          for (int r = 0; r < NrVRFWords; r++) begin
+            if (tracking_active_q[r] && consumed_by_frozen_q[r] && rvalid_per_addr[r] != '0) begin
+              if (consumed_by_q[r] >= CntW'(rvalid_per_addr[r]))
+                consumed_by_d[r] = consumed_by_q[r] - CntW'(rvalid_per_addr[r]);
+              else
+                consumed_by_d[r] = '0;
+            end
+          end
+        end
+
+        // ---- LEP: gate writes; decrement consumed_by on reads; reset on committed write ----
+        if (loop_state_i == LoopLep) begin
+          for (int r = 0; r < NrVRFWords; r++) begin
+            automatic logic has_write = 1'b0;
+            for (int p = 0; p < NrWritePorts; p++) begin
+              if (wvalid_o[p] && tracking_active_q[r] && (unsigned'(waddr_i[p]) == r))
+                has_write = 1'b1;
+            end
+
+            if (has_write) begin
+              if (consumer_count_q[r] >= CntW'(rvalid_per_addr[r]))
+                consumed_by_d[r] = consumer_count_q[r] - CntW'(rvalid_per_addr[r]);
+              else
+                consumed_by_d[r] = '0;
+            end else if (tracking_active_q[r] && rvalid_per_addr[r] != '0) begin
+              if (consumed_by_q[r] >= CntW'(rvalid_per_addr[r]))
+                consumed_by_d[r] = consumed_by_q[r] - CntW'(rvalid_per_addr[r]);
+              else
+                consumed_by_d[r] = '0;
+            end
+          end
+        end
+
+      end // not LoopRegular/LoopHwLoop
+    end : proc_war_tracking
+
+    `FF(tracking_active_q,    tracking_active_d,    '0, clk_i, rst_ni)
+    `FF(consumer_count_q,     consumer_count_d,     '0, clk_i, rst_ni)
+    `FF(consumed_by_q,        consumed_by_d,        '0, clk_i, rst_ni)
+    `FF(consumed_by_frozen_q, consumed_by_frozen_d, '0, clk_i, rst_ni)
+    `FF(rvalid_q,             rvalid_o,             '0, clk_i, rst_ni)
+    `FF(raddr_q,              raddr_i,              '0, clk_i, rst_ni)
+
+  end else begin : gen_no_simd_war_tracking
+
+    assign tracking_active_q    = '0;
+    assign consumer_count_q     = '0;
+    assign consumed_by_q        = '0;
+    assign consumed_by_frozen_q = '0;
+
+  end : gen_no_simd_war_tracking
 
   ////////////////
   // VREG Banks //
