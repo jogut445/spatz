@@ -465,6 +465,7 @@ module spatz import spatz_pkg::*; import rvv_pkg::*; import fpnew_pkg::*; #(
     .spatz_req_i      (spatz_req                                               ),
     .spatz_req_valid_i(spatz_req_valid                                         ),
     .spatz_req_ready_o(vfu_req_ready                                           ),
+    .spatz_req_first_o(/* unused */                                            ),
     // Response
     .vfu_rsp_valid_o  (vfu_rsp_valid                                           ),
     .vfu_rsp_ready_i  (vfu_rsp_ready                                           ),
