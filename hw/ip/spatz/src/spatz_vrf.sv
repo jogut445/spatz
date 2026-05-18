@@ -105,6 +105,7 @@ module spatz_vrf
   logic                          [NrVRFWords-1:0] tracking_active_q;
   logic [NrVRFWords-1:0][CntW-1:0]               consumer_count_q;
   logic [NrVRFWords-1:0][CntW-1:0]               consumed_by_q;
+  logic [NrVRFWords-1:0][CntW-1:0]               consumed_by_d;
   logic                          [NrVRFWords-1:0] consumed_by_frozen_q;
   // Write-blocked mask for LEP gating (combinational)
   logic [NrWritePorts-1:0]                        lep_write_blocked;
@@ -272,7 +273,16 @@ module spatz_vrf
   always_comb begin: gen_read_request
     for (int bank = 0; bank < NrVRFBanks; bank++) begin
       for (int port = 0; port < NrReadPorts; port++) begin
-        read_request[bank][port] = re_i[port] && f_bank(raddr_i[port]) == bank;
+        // In LEP: stall reads to a tracked register while consumed_by == 0.
+        // consumed_by == 0 means all consumers for the current iteration have
+        // finished but the write has not yet fired to reset it; letting the next
+        // iteration's read through now would leave consumed_by permanently at 0
+        // and block the subsequent write forever.
+        automatic logic lep_read_stall = SIMD && (loop_state_i == LoopLep)
+                                         && tracking_active_q[raddr_i[port]]
+                                         && (consumed_by_q[raddr_i[port]] == '0);
+        read_request[bank][port] = re_i[port] && !lep_read_stall
+                                   && f_bank(raddr_i[port]) == bank;
       end
     end
   end: gen_read_request
@@ -351,6 +361,18 @@ module spatz_vrf
       end
 `endif
     end
+
+    // Combinatorial WAR suppression: if a new read transaction starts (re_first_i)
+    // while consumed_by is already 0 in LEP, kill rvalid_o for that port in this
+    // same cycle. The registered lep_read_stall acts one cycle late and cannot
+    // prevent the VFU from sampling stale data on the very first beat.
+    if (SIMD && loop_state_i == LoopLep) begin
+      for (int p = 0; p < NrReadPorts; p++) begin
+        if (re_first_i[p] && tracking_active_q[raddr_i[p]]
+                          && consumed_by_d[raddr_i[p]] == '0)
+          rvalid_o[p] = 1'b0;
+      end
+    end
   end
 
   ///////////////////////
@@ -371,7 +393,6 @@ module spatz_vrf
 
     logic [NrVRFWords-1:0]           tracking_active_d;
     logic [NrVRFWords-1:0][CntW-1:0] consumer_count_d;
-    logic [NrVRFWords-1:0][CntW-1:0] consumed_by_d;
     logic [NrVRFWords-1:0]           consumed_by_frozen_d;
 
     // Detect last beat of each read transaction:
@@ -438,11 +459,15 @@ module spatz_vrf
           end
 
           for (int r = 0; r < NrVRFWords; r++) begin
-            if (tracking_active_q[r] && consumed_by_frozen_q[r] && rvalid_per_addr[r] != '0) begin
-              if (consumed_by_q[r] >= CntW'(rvalid_per_addr[r]))
-                consumed_by_d[r] = consumed_by_q[r] - CntW'(rvalid_per_addr[r]);
-              else
-                consumed_by_d[r] = '0;
+            if (tracking_active_q[r] && rvalid_per_addr[r] != '0) begin
+              if (!consumed_by_frozen_q[r])
+                consumer_count_d[r] = consumer_count_q[r] + CntW'(rvalid_per_addr[r]);
+              else begin
+                if (consumed_by_q[r] >= CntW'(rvalid_per_addr[r]))
+                  consumed_by_d[r] = consumed_by_q[r] - CntW'(rvalid_per_addr[r]);
+                else
+                  consumed_by_d[r] = '0;
+              end
             end
           end
         end
@@ -485,6 +510,7 @@ module spatz_vrf
     assign tracking_active_q    = '0;
     assign consumer_count_q     = '0;
     assign consumed_by_q        = '0;
+    assign consumed_by_d        = '0;
     assign consumed_by_frozen_q = '0;
 
   end : gen_no_simd_war_tracking
