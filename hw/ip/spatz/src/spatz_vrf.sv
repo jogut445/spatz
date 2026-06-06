@@ -109,18 +109,42 @@ module spatz_vrf
   logic                          [NrVRFWords-1:0] consumed_by_frozen_q;
   // Write-blocked mask for LEP gating (combinational)
   logic [NrWritePorts-1:0]                        lep_write_blocked;
+  // Old-value fully-consumed mask (combinational). Set for a tracked register
+  // when every consumer of the value it currently holds has completed *as of
+  // this cycle* (registered consumed_by minus this cycle's last-beat reads == 0).
+  // Drives BOTH the write unblock and the read stall, so the producer write is
+  // released in the very cycle the reference count reaches zero (no bubble) and
+  // reads are held until that write commits (no stale RAW read). Driven
+  // write-independently inside gen_simd_war_tracking -> no comb loop with wvalid_o.
+  logic                          [NrVRFWords-1:0] lep_old_drained;
 
   ///////////////////
   // Write Mapping //
   ///////////////////
 
-  // In LEP: block writes to tracked registers that still have pending consumers.
-  // Only active in SIMD mode; in standard Spatz always 0.
+  // Block writes to tracked registers that still have pending consumers of the
+  // value they currently hold. Released the cycle the reference count reaches
+  // zero (lep_old_drained, which already accounts for this cycle's reads) so the
+  // write commits in that same cycle with no bubble. Only active in SIMD mode;
+  // in standard Spatz always 0.
+  //
+  // Covers BOTH LoopLcp2 and LoopLep, symmetric with the combinatorial read-stall
+  // below (which already spans {LoopLcp2, LoopLep}). The previous LoopLep-only
+  // gate left a hole in LCP2: with the pipelined VLSU load->load hand-off, a
+  // producer write can become ready a cycle early and commit before the old
+  // value's consumers have read it - corrupting the value (seen as a whole-row
+  // error in vfu_test_gemm_3x). The consumed_by_frozen_q guard restricts the
+  // block to registers whose consumer count is meaningful: an unfrozen reg in
+  // LCP2 still has consumed_by_q == 0 (so lep_old_drained would be spuriously
+  // true anyway) and must not block its own freezing first write. In LEP every
+  // tracked reg is already frozen, so the guard is a no-op there.
   always_comb begin : gen_lep_write_blocked
     lep_write_blocked = '0;
-    if (SIMD && loop_state_i == LoopLep) begin
+    if (SIMD && (loop_state_i inside {LoopLcp2, LoopLep})) begin
       for (int p = 0; p < NrWritePorts; p++) begin
-        if (we_i[p] && tracking_active_q[waddr_i[p]] && (consumed_by_q[waddr_i[p]] != '0))
+        if (we_i[p] && tracking_active_q[waddr_i[p]]
+                    && consumed_by_frozen_q[waddr_i[p]]
+                    && !lep_old_drained[waddr_i[p]])
           lep_write_blocked[p] = 1'b1;
       end
     end
@@ -278,6 +302,7 @@ module spatz_vrf
         // finished but the write has not yet fired to reset it; letting the next
         // iteration's read through now would leave consumed_by permanently at 0
         // and block the subsequent write forever.
+        // automatic logic lep_read_stall = '0;
         automatic logic lep_read_stall = SIMD && (loop_state_i == LoopLep)
                                          && tracking_active_q[raddr_i[port]]
                                          && (consumed_by_q[raddr_i[port]] == '0);
@@ -362,15 +387,52 @@ module spatz_vrf
 `endif
     end
 
-    // Combinatorial WAR suppression: if a new read transaction starts (re_first_i)
-    // while consumed_by is already 0 in LEP, kill rvalid_o for that port in this
-    // same cycle. The registered lep_read_stall acts one cycle late and cannot
-    // prevent the VFU from sampling stale data on the very first beat.
-    if (SIMD && loop_state_i == LoopLep) begin
+    // Combinatorial WAR/RAW handling for the loop epilogue.
+    //
+    // Once the value a tracked register currently holds is fully consumed
+    // (lep_old_drained) its next value must come from the pending producer write
+    // - any read of that register has to take that new value, never the stale SCM
+    // contents. Per read of a drained register, in the SAME cycle:
+    //   * if the producer write is committing -> byte-merge its data over the SCM
+    //     read and assert rvalid_o (read served the very cycle the write fires);
+    //   * otherwise -> hold rvalid_o low (stall) until the write commits.
+    //
+    // The stall is gated on re_i, NOT re_first_i: re_first_i is a single-cycle
+    // pulse, so a read that has to wait several cycles for the producer would slip
+    // through on every cycle after the first. re_i stays high for the whole read
+    // transaction, so the decision is re-evaluated every cycle the read is
+    // outstanding. A stalled read drives rvalid_o=0, so it is never counted as a
+    // last-beat (rvalid_q stays 0) and cannot corrupt the consumer count; it is
+    // charged to the new value only once it is actually served via forwarding.
+    //
+    // Covers LoopLcp2 as well as LoopLep: the consumed_by count is already frozen
+    // and decrementing in LCP2, and a "first-LEP" read can be sampled in the
+    // boundary cycle while loop_state_i still reads LoopLcp2 - gating on LoopLep
+    // alone would let exactly that read escape the stall.
+    if (SIMD && (loop_state_i inside {LoopLcp2, LoopLep})) begin
       for (int p = 0; p < NrReadPorts; p++) begin
-        if (re_first_i[p] && tracking_active_q[raddr_i[p]]
-                          && consumed_by_d[raddr_i[p]] == '0)
-          rvalid_o[p] = 1'b0;
+        // consumed_by_frozen_q gates out tracked regs still in their LCP2
+        // counting phase: there consumed_by_q is 0 (not yet frozen) so
+        // lep_old_drained would be spuriously true and stall the very reads that
+        // must be counted. Once frozen, the count is meaningful and the drain
+        // stall applies (and in LEP every tracked reg is already frozen).
+        if (re_i[p] && tracking_active_q[raddr_i[p]] && consumed_by_frozen_q[raddr_i[p]]
+                    && lep_old_drained[raddr_i[p]]) begin
+          automatic logic committing = 1'b0;
+          for (int w = 0; w < NrWritePorts; w++) begin
+            if (wvalid_o[w] && (waddr_i[w] == raddr_i[p])) begin
+              // Byte-wise merge honouring the write byte-enable; unwritten bytes
+              // keep the (correct, unaffected) SCM read data.
+              for (int b = 0; b < $bits(vrf_be_t); b++) begin
+                if (wbe_i[w][b])
+                  rdata_o[p][b*8 +: 8] = wdata_i[w][b*8 +: 8];
+              end
+              committing = 1'b1;
+            end
+          end
+          // Drained read: serve the forwarded write this cycle, else stall.
+          rvalid_o[p] = committing;
+        end
       end
     end
   end
@@ -411,6 +473,23 @@ module spatz_vrf
           rvalid_per_addr[raddr_q[p]] = rvalid_per_addr[raddr_q[p]] + ReadCntW'(1);
       end
     end : gen_rvalid_per_addr
+
+    // Old value fully consumed as of this cycle: registered consumed_by minus
+    // this cycle's last-beat reads == 0. Purely a function of registered state
+    // and rvalid_per_addr (which derives from rvalid_q), so it does NOT depend on
+    // wvalid_o -> safe to feed the write unblock without a combinational loop.
+    always_comb begin : gen_lep_old_drained
+      lep_old_drained = '0;
+      for (int r = 0; r < NrVRFWords; r++) begin
+        if (tracking_active_q[r]) begin
+          automatic logic [CntW-1:0] cby_after =
+            (consumed_by_q[r] >= CntW'(rvalid_per_addr[r]))
+              ? consumed_by_q[r] - CntW'(rvalid_per_addr[r])
+              : '0;
+          lep_old_drained[r] = (cby_after == '0);
+        end
+      end
+    end : gen_lep_old_drained
 
     always_comb begin : proc_war_tracking
       tracking_active_d    = tracking_active_q;
@@ -459,7 +538,23 @@ module spatz_vrf
           end
 
           for (int r = 0; r < NrVRFWords; r++) begin
-            if (tracking_active_q[r] && rvalid_per_addr[r] != '0) begin
+            // A committing write to an ALREADY-frozen register (e.g. the next
+            // producer write released by gen_lep_write_blocked in LCP2 once the
+            // old value drained - reachable now that the write-block spans LCP2
+            // for the pipelined VLSU hand-off). Re-arm exactly like LEP: the reads
+            // this cycle are the last consumers of the OLD value and must not be
+            // charged against the freshly written value. The freezing first write
+            // (frozen_q==0) is handled by the write loop above and is excluded here.
+            automatic logic has_frozen_write = 1'b0;
+            for (int p = 0; p < NrWritePorts; p++) begin
+              if (wvalid_o[p] && tracking_active_q[r] && consumed_by_frozen_q[r]
+                              && (unsigned'(waddr_i[p]) == r))
+                has_frozen_write = 1'b1;
+            end
+
+            if (has_frozen_write) begin
+              consumed_by_d[r] = consumer_count_q[r];
+            end else if (tracking_active_q[r] && rvalid_per_addr[r] != '0) begin
               if (!consumed_by_frozen_q[r])
                 consumer_count_d[r] = consumer_count_q[r] + CntW'(rvalid_per_addr[r]);
               else begin
@@ -482,10 +577,13 @@ module spatz_vrf
             end
 
             if (has_write) begin
-              if (consumer_count_q[r] >= CntW'(rvalid_per_addr[r]))
-                consumed_by_d[r] = consumer_count_q[r] - CntW'(rvalid_per_addr[r]);
-              else
-                consumed_by_d[r] = '0;
+              // The write commits the cycle the count reaches zero (lep_old_drained).
+              // The reads counted this cycle (rvalid_per_addr) are the LAST consumers
+              // of the OLD value -- they are what drove the count to zero -- so they
+              // must NOT be charged against the freshly written value. Re-arm to the
+              // full consumer_count; consumers of the new value (including a read
+              // forwarded this same cycle) are counted on their own last beat.
+              consumed_by_d[r] = consumer_count_q[r];
             end else if (tracking_active_q[r] && rvalid_per_addr[r] != '0) begin
               if (consumed_by_q[r] >= CntW'(rvalid_per_addr[r]))
                 consumed_by_d[r] = consumed_by_q[r] - CntW'(rvalid_per_addr[r]);
@@ -512,6 +610,7 @@ module spatz_vrf
     assign consumed_by_q        = '0;
     assign consumed_by_d        = '0;
     assign consumed_by_frozen_q = '0;
+    assign lep_old_drained      = '0;
 
   end : gen_no_simd_war_tracking
 
