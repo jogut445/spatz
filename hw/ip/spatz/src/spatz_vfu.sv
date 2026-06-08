@@ -23,6 +23,7 @@ module spatz_vfu
     input  spatz_req_t       spatz_req_i,
     input  logic             spatz_req_valid_i,
     output logic             spatz_req_ready_o,
+    output logic             spatz_req_first_o,
     // VFU response
     output logic             vfu_rsp_valid_o,
     input  logic             vfu_rsp_ready_i,
@@ -73,17 +74,23 @@ module spatz_vfu
   logic       spatz_req_valid;
   logic       spatz_req_ready;
 
-  spill_register #(
-    .T(spatz_req_t)
+
+  stream_fifo #(
+    .T            (spatz_req_t),
+    .DEPTH        (VFUBufDepth),
+    .FALL_THROUGH (1'b1)
   ) i_operation_queue (
-    .clk_i  (clk_i                                          ),
-    .rst_ni (rst_ni                                         ),
-    .data_i (spatz_req_i                                    ),
-    .valid_i(spatz_req_valid_i && spatz_req_i.ex_unit == VFU),
-    .ready_o(spatz_req_ready_o                              ),
-    .data_o (spatz_req                                      ),
-    .valid_o(spatz_req_valid                                ),
-    .ready_i(spatz_req_ready                                )
+    .clk_i      (clk_i                                          ),
+    .rst_ni     (rst_ni                                         ),
+    .flush_i    (1'b0                                           ),
+    .testmode_i (1'b0                                           ),
+    .usage_o    (/* unused */                                   ),
+    .data_i     (spatz_req_i                                    ),
+    .valid_i    (spatz_req_valid_i && spatz_req_i.ex_unit == VFU),
+    .ready_o    (spatz_req_ready_o                              ),
+    .data_o     (spatz_req                                      ),
+    .valid_o    (spatz_req_valid                                ),
+    .ready_i    (spatz_req_ready                                )
   );
 
   ///////////////
@@ -883,6 +890,10 @@ assign vfcmp_result_accepted = (spatz_req.op == VFCMP) && &(result_valid | ~pend
   end
 
   `FF(wdata_q, wdata_d, '0)
+
+  // Pulses on the first cycle a new instruction is visible at the FIFO output
+  // (running_q not yet set), which is exactly when re_o first goes high.
+  assign spatz_req_first_o = spatz_req_valid && !running_q[spatz_req.id];
 
   // Register file signals
   assign vrf_re_o    = vreg_r_req;

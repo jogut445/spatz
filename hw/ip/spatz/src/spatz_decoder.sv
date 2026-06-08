@@ -11,8 +11,11 @@ module spatz_decoder
   import spatz_pkg::*;
   import rvv_pkg::*;
   import fpnew_pkg::roundmode_e;
-  import fpnew_pkg::fmt_mode_t;
-  (
+  import fpnew_pkg::fmt_mode_t; #(
+    parameter bit decode_vfu   = 1'b1,
+    parameter bit decode_vsldu = 1'b1,
+    parameter bit decode_vlsu  = 1'b1
+  ) (
     input  logic         clk_i,
     input  logic         rst_ni,
     // Request
@@ -86,127 +89,130 @@ module spatz_decoder
         riscv_instr::VSOXEI16_V,
         riscv_instr::VSOXEI32_V,
         riscv_instr::VSOXEI64_V: begin
-          automatic vreg_t ls_vd         = decoder_req_i.instr[11:7];
-          automatic vreg_t ls_rs1        = decoder_req_i.instr[19:15];
-          automatic vreg_t ls_s2         = decoder_req_i.instr[24:20];
-          automatic logic [2:0] ls_width = decoder_req_i.instr[14:12];
-          automatic logic ls_vm          = decoder_req_i.instr[25];
-          automatic logic [1:0] ls_mop   = decoder_req_i.instr[27:26];
-          automatic logic ls_mew         = decoder_req_i.instr[28];
-          automatic logic [2:0] ls_nf    = decoder_req_i.instr[31:29];
+          if(decode_vlsu) begin
+            automatic vreg_t ls_vd         = decoder_req_i.instr[11:7];
+            automatic vreg_t ls_rs1        = decoder_req_i.instr[19:15];
+            automatic vreg_t ls_s2         = decoder_req_i.instr[24:20];
+            automatic logic [2:0] ls_width = decoder_req_i.instr[14:12];
+            automatic logic ls_vm          = decoder_req_i.instr[25];
+            automatic logic [1:0] ls_mop   = decoder_req_i.instr[27:26];
+            automatic logic ls_mew         = decoder_req_i.instr[28];
+            automatic logic [2:0] ls_nf    = decoder_req_i.instr[31:29];
 
-          // Retrieve VSEW
-          unique case ({ls_mew, ls_width})
-            4'b0000: spatz_req.vtype.vsew = EW_8;
-            4'b0101: spatz_req.vtype.vsew = EW_16;
-            4'b0110: spatz_req.vtype.vsew = EW_32;
-            4'b0111: spatz_req.vtype.vsew = EW_64;
-            default: illegal_instr        = 1'b1;
-          endcase
+            // Retrieve VSEW
+            unique case ({ls_mew, ls_width})
+              4'b0000: spatz_req.vtype.vsew = EW_8;
+              4'b0101: spatz_req.vtype.vsew = EW_16;
+              4'b0110: spatz_req.vtype.vsew = EW_32;
+              4'b0111: spatz_req.vtype.vsew = EW_64;
+              default: illegal_instr        = 1'b1;
+            endcase
 
-          spatz_req.op_mem.vm = ls_vm;
-          spatz_req.ex_unit   = LSU;
+            spatz_req.op_mem.vm = ls_vm;
+            spatz_req.ex_unit   = LSU;
 
-          // Illegal width?
-          if (spatz_req.vtype.vsew == EW_64 && MAXEW != EW_64)
-            illegal_instr = 1'b1;
-
-          // Check which type of load or store operation is requested
-          unique casez (decoder_req_i.instr)
-            riscv_instr::VLE8_V,
-            riscv_instr::VLE16_V,
-            riscv_instr::VLE32_V,
-            riscv_instr::VLE64_V: begin
-              spatz_req.op             = VLE;
-              spatz_req.op_mem.is_load = 1'b1;
-              spatz_req.vd             = ls_vd;
-              spatz_req.use_vd         = 1'b1;
-              spatz_req.rs1            = decoder_req_i.rs1;
-            end
-
-            riscv_instr::VLSE8_V,
-            riscv_instr::VLSE16_V,
-            riscv_instr::VLSE32_V,
-            riscv_instr::VLSE64_V: begin
-              spatz_req.op             = VLSE;
-              spatz_req.op_mem.is_load = 1'b1;
-              spatz_req.vd             = ls_vd;
-              spatz_req.use_vd         = 1'b1;
-              spatz_req.rs1            = decoder_req_i.rs1;
-              spatz_req.rs2            = decoder_req_i.rs2;
-            end
-
-            riscv_instr::VLUXEI8_V,
-            riscv_instr::VLUXEI16_V,
-            riscv_instr::VLUXEI32_V,
-            riscv_instr::VLUXEI64_V,
-            riscv_instr::VLOXEI8_V,
-            riscv_instr::VLOXEI16_V,
-            riscv_instr::VLOXEI32_V,
-            riscv_instr::VLOXEI64_V: begin
-              spatz_req.op             = VLXE;
-              spatz_req.op_mem.is_load = 1'b1;
-              spatz_req.vd             = ls_vd;
-              spatz_req.use_vd         = 1'b1;
-              spatz_req.rs1            = decoder_req_i.rs1;
-              spatz_req.vs2            = ls_s2;
-              spatz_req.use_vs2        = 1'b1;
-
-              // This is an indexed operation
-              spatz_req.op_mem.ew  = spatz_req.vtype.vsew;
-              spatz_req.vtype.vsew = decoder_req_i.vtype.vsew;
-            end
-
-            riscv_instr::VSE8_V,
-            riscv_instr::VSE16_V,
-            riscv_instr::VSE32_V,
-            riscv_instr::VSE64_V: begin
-              spatz_req.op             = VSE;
-              spatz_req.op_mem.is_load = 1'b0;
-              spatz_req.vd             = ls_vd;
-              spatz_req.use_vd         = 1'b1;
-              spatz_req.vd_is_src      = 1'b1;
-              spatz_req.rs1            = decoder_req_i.rs1;
-            end
-
-            riscv_instr::VSSE8_V,
-            riscv_instr::VSSE16_V,
-            riscv_instr::VSSE32_V,
-            riscv_instr::VSSE64_V: begin
-              spatz_req.op             = VSSE;
-              spatz_req.op_mem.is_load = 1'b0;
-              spatz_req.vd             = ls_vd;
-              spatz_req.use_vd         = 1'b1;
-              spatz_req.vd_is_src      = 1'b1;
-              spatz_req.rs1            = decoder_req_i.rs1;
-              spatz_req.rs2            = decoder_req_i.rs2;
-            end
-
-            riscv_instr::VSUXEI8_V,
-            riscv_instr::VSUXEI16_V,
-            riscv_instr::VSUXEI32_V,
-            riscv_instr::VSUXEI64_V,
-            riscv_instr::VSOXEI8_V,
-            riscv_instr::VSOXEI16_V,
-            riscv_instr::VSOXEI32_V,
-            riscv_instr::VSOXEI64_V: begin
-              spatz_req.op             = VSXE;
-              spatz_req.op_mem.is_load = 1'b0;
-              spatz_req.vd             = ls_vd;
-              spatz_req.use_vd         = 1'b1;
-              spatz_req.vd_is_src      = 1'b1;
-              spatz_req.rs1            = decoder_req_i.rs1;
-              spatz_req.vs2            = ls_s2;
-              spatz_req.use_vs2        = 1'b1;
-
-              // This is an indexed operation
-              spatz_req.op_mem.ew  = spatz_req.vtype.vsew;
-              spatz_req.vtype.vsew = decoder_req_i.vtype.vsew;
-            end
-
-            default:
+            // Illegal width?
+            if (spatz_req.vtype.vsew == EW_64 && MAXEW != EW_64)
               illegal_instr = 1'b1;
-          endcase // decoder_req_i.instr
+
+            // Check which type of load or store operation is requested
+            unique casez (decoder_req_i.instr)
+              riscv_instr::VLE8_V,
+              riscv_instr::VLE16_V,
+              riscv_instr::VLE32_V,
+              riscv_instr::VLE64_V: begin
+                spatz_req.op             = VLE;
+                spatz_req.op_mem.is_load = 1'b1;
+                spatz_req.vd             = ls_vd;
+                spatz_req.use_vd         = 1'b1;
+                spatz_req.rs1            = decoder_req_i.rs1;
+              end
+
+              riscv_instr::VLSE8_V,
+              riscv_instr::VLSE16_V,
+              riscv_instr::VLSE32_V,
+              riscv_instr::VLSE64_V: begin
+                spatz_req.op             = VLSE;
+                spatz_req.op_mem.is_load = 1'b1;
+                spatz_req.vd             = ls_vd;
+                spatz_req.use_vd         = 1'b1;
+                spatz_req.rs1            = decoder_req_i.rs1;
+                spatz_req.rs2            = decoder_req_i.rs2;
+              end
+
+              riscv_instr::VLUXEI8_V,
+              riscv_instr::VLUXEI16_V,
+              riscv_instr::VLUXEI32_V,
+              riscv_instr::VLUXEI64_V,
+              riscv_instr::VLOXEI8_V,
+              riscv_instr::VLOXEI16_V,
+              riscv_instr::VLOXEI32_V,
+              riscv_instr::VLOXEI64_V: begin
+                spatz_req.op             = VLXE;
+                spatz_req.op_mem.is_load = 1'b1;
+                spatz_req.vd             = ls_vd;
+                spatz_req.use_vd         = 1'b1;
+                spatz_req.rs1            = decoder_req_i.rs1;
+                spatz_req.vs2            = ls_s2;
+                spatz_req.use_vs2        = 1'b1;
+
+                // This is an indexed operation
+                spatz_req.op_mem.ew  = spatz_req.vtype.vsew;
+                spatz_req.vtype.vsew = decoder_req_i.vtype.vsew;
+              end
+
+              riscv_instr::VSE8_V,
+              riscv_instr::VSE16_V,
+              riscv_instr::VSE32_V,
+              riscv_instr::VSE64_V: begin
+                spatz_req.op             = VSE;
+                spatz_req.op_mem.is_load = 1'b0;
+                spatz_req.vd             = ls_vd;
+                spatz_req.use_vd         = 1'b1;
+                spatz_req.vd_is_src      = 1'b1;
+                spatz_req.rs1            = decoder_req_i.rs1;
+              end
+
+              riscv_instr::VSSE8_V,
+              riscv_instr::VSSE16_V,
+              riscv_instr::VSSE32_V,
+              riscv_instr::VSSE64_V: begin
+                spatz_req.op             = VSSE;
+                spatz_req.op_mem.is_load = 1'b0;
+                spatz_req.vd             = ls_vd;
+                spatz_req.use_vd         = 1'b1;
+                spatz_req.vd_is_src      = 1'b1;
+                spatz_req.rs1            = decoder_req_i.rs1;
+                spatz_req.rs2            = decoder_req_i.rs2;
+              end
+
+              riscv_instr::VSUXEI8_V,
+              riscv_instr::VSUXEI16_V,
+              riscv_instr::VSUXEI32_V,
+              riscv_instr::VSUXEI64_V,
+              riscv_instr::VSOXEI8_V,
+              riscv_instr::VSOXEI16_V,
+              riscv_instr::VSOXEI32_V,
+              riscv_instr::VSOXEI64_V: begin
+                spatz_req.op             = VSXE;
+                spatz_req.op_mem.is_load = 1'b0;
+                spatz_req.vd             = ls_vd;
+                spatz_req.use_vd         = 1'b1;
+                spatz_req.vd_is_src      = 1'b1;
+                spatz_req.rs1            = decoder_req_i.rs1;
+                spatz_req.vs2            = ls_s2;
+                spatz_req.use_vs2        = 1'b1;
+
+                // This is an indexed operation
+                spatz_req.op_mem.ew  = spatz_req.vtype.vsew;
+                spatz_req.vtype.vsew = decoder_req_i.vtype.vsew;
+              end
+
+              default:
+                illegal_instr = 1'b1;
+            endcase // decoder_req_i.instr
+          end else
+            illegal_instr = 1'b1;
         end
 
         // Vector instruction
@@ -344,505 +350,511 @@ module spatz_decoder
         riscv_instr::VSLIDEDOWN_VX,
         riscv_instr::VSLIDEDOWN_VI,
         riscv_instr::VSLIDE1DOWN_VX: begin
-          automatic opcodev_func3_e func3 = opcodev_func3_e'(decoder_req_i.instr[14:12]);
-          automatic vreg_t arith_s1       = decoder_req_i.instr[19:15];
-          automatic vreg_t arith_s2       = decoder_req_i.instr[24:20];
-          automatic vreg_t arith_d        = decoder_req_i.instr[11:7];
-          automatic logic arith_vm        = decoder_req_i.instr[25];
+          if (decode_vfu || decode_vsldu) begin
+            automatic opcodev_func3_e func3 = opcodev_func3_e'(decoder_req_i.instr[14:12]);
+            automatic vreg_t arith_s1       = decoder_req_i.instr[19:15];
+            automatic vreg_t arith_s2       = decoder_req_i.instr[24:20];
+            automatic vreg_t arith_d        = decoder_req_i.instr[11:7];
+            automatic logic arith_vm        = decoder_req_i.instr[25];
 
-          spatz_req.op_arith.vm = arith_vm;
-          spatz_req.op_sld.vm   = arith_vm;
-          spatz_req.use_vs2     = 1'b1;
-          spatz_req.vs2         = arith_s2;
-          spatz_req.use_vd      = 1'b1;
-          spatz_req.vd          = arith_d;
-          spatz_req.ex_unit     = VFU;
+            spatz_req.op_arith.vm = arith_vm;
+            spatz_req.op_sld.vm   = arith_vm;
+            spatz_req.use_vs2     = 1'b1;
+            spatz_req.vs2         = arith_s2;
+            spatz_req.use_vd      = 1'b1;
+            spatz_req.vd          = arith_d;
+            spatz_req.ex_unit     = VFU;
 
-          // Decide which operands to use (vs1 or rs1 or imm)
-          unique case (func3)
-            OPIVV,
-            OPMVV: begin
-              spatz_req.use_vs1 = 1'b1;
-              spatz_req.vs1     = arith_s1;
-            end
-            OPIVI: begin
-              spatz_req.rs1 = elen_t'(signed'(arith_s1));
-            end
-            OPIVX,
-            OPMVX: begin
-              spatz_req.rs1 = decoder_req_i.rs1;
-            end
-            default: illegal_instr = 1'b1;
-          endcase
-
-          // Check what arithmetic operation is requested
-          unique casez (decoder_req_i.instr)
-            // Vector Arithmetic
-            riscv_instr::VADD_VV,
-            riscv_instr::VADD_VX,
-            riscv_instr::VADD_VI: begin
-              spatz_req.op = VADD;
-            end
-
-            riscv_instr::VSUB_VV,
-            riscv_instr::VSUB_VX: begin
-              spatz_req.op = VSUB;
-            end
-
-            riscv_instr::VRSUB_VX,
-            riscv_instr::VRSUB_VI: begin
-              spatz_req.op = VRSUB;
-            end
-
-            // Vector Widening Arithmetic
-            riscv_instr::VWADD_VV,
-            riscv_instr::VWADD_VX: begin
-              spatz_req.op                  = VADD;
-              spatz_req.op_arith.widen_vs1  = 1'b1;
-              spatz_req.op_arith.signed_vs1 = 1'b1;
-              spatz_req.op_arith.widen_vs2  = 1'b1;
-              spatz_req.op_arith.signed_vs2 = 1'b1;
-            end
-
-            riscv_instr::VWADDU_VV,
-            riscv_instr::VWADDU_VX: begin
-              spatz_req.op                 = VADD;
-              spatz_req.op_arith.widen_vs1 = 1'b1;
-              spatz_req.op_arith.widen_vs2 = 1'b1;
-            end
-
-            riscv_instr::VWSUB_VV,
-            riscv_instr::VWSUB_VX: begin
-              spatz_req.op                  = VSUB;
-              spatz_req.op_arith.widen_vs1  = 1'b1;
-              spatz_req.op_arith.signed_vs1 = 1'b1;
-              spatz_req.op_arith.widen_vs2  = 1'b1;
-              spatz_req.op_arith.signed_vs2 = 1'b1;
-            end
-
-            riscv_instr::VWSUBU_VV,
-            riscv_instr::VWSUBU_VX: begin
-              spatz_req.op                 = VSUB;
-              spatz_req.op_arith.widen_vs1 = 1'b1;
-              spatz_req.op_arith.widen_vs2 = 1'b1;
-            end
-
-            // Vector Logic
-            riscv_instr::VAND_VV,
-            riscv_instr::VAND_VX,
-            riscv_instr::VAND_VI: begin
-              spatz_req.op = VAND;
-            end
-
-            riscv_instr::VOR_VV,
-            riscv_instr::VOR_VX,
-            riscv_instr::VOR_VI: begin
-              spatz_req.op = VOR;
-            end
-
-            riscv_instr::VXOR_VV,
-            riscv_instr::VXOR_VX,
-            riscv_instr::VXOR_VI: begin
-              spatz_req.op = VXOR;
-            end
-
-            // Vector Arithmetic with Carry
-            riscv_instr::VADC_VVM,
-            riscv_instr::VADC_VXM,
-            riscv_instr::VADC_VIM: begin
-              spatz_req.op = VADC;
-            end
-
-            riscv_instr::VMADC_VV,
-            riscv_instr::VMADC_VX,
-            riscv_instr::VMADC_VI: begin
-              spatz_req.op = VMADC;
-            end
-
-            riscv_instr::VMADC_VVM,
-            riscv_instr::VMADC_VXM,
-            riscv_instr::VMADC_VIM: begin
-              spatz_req.op                           = VMADC;
-              spatz_req.op_arith.use_carry_borrow_in = 1'b1;
-            end
-
-            riscv_instr::VSBC_VVM,
-            riscv_instr::VSBC_VXM: begin
-              spatz_req.op = VSBC;
-            end
-
-            riscv_instr::VMSBC_VV,
-            riscv_instr::VMSBC_VX: begin
-              spatz_req.op = VMSBC;
-            end
-
-            riscv_instr::VMSBC_VVM,
-            riscv_instr::VMSBC_VXM: begin
-              spatz_req.op                           = VMSBC;
-              spatz_req.op_arith.use_carry_borrow_in = 1'b1;
-            end
-
-            // Reductions
-            riscv_instr::VREDSUM_VS: begin
-              spatz_req.op                    = VADD;
-              spatz_req.op_arith.is_reduction = 1'b1;
-              // Switch vs1 and vs2
-              spatz_req.vs1                   = arith_s2;
-              spatz_req.vs2                   = arith_s1;
-            end
-
-            riscv_instr::VREDAND_VS: begin
-              spatz_req.op                    = VAND;
-              spatz_req.op_arith.is_reduction = 1'b1;
-              // Switch vs1 and vs2
-              spatz_req.vs1                   = arith_s2;
-              spatz_req.vs2                   = arith_s1;
-            end
-
-            riscv_instr::VREDOR_VS: begin
-              spatz_req.op                    = VOR;
-              spatz_req.op_arith.is_reduction = 1'b1;
-              // Switch vs1 and vs2
-              spatz_req.vs1                   = arith_s2;
-              spatz_req.vs2                   = arith_s1;
-            end
-
-            riscv_instr::VREDXOR_VS: begin
-              spatz_req.op                    = VXOR;
-              spatz_req.op_arith.is_reduction = 1'b1;
-              // Switch vs1 and vs2
-              spatz_req.vs1                   = arith_s2;
-              spatz_req.vs2                   = arith_s1;
-            end
-
-            riscv_instr::VREDMIN_VS: begin
-              spatz_req.op                    = VMIN;
-              spatz_req.op_arith.is_reduction = 1'b1;
-              // Switch vs1 and vs2
-              spatz_req.vs1                   = arith_s2;
-              spatz_req.vs2                   = arith_s1;
-            end
-
-            riscv_instr::VREDMINU_VS: begin
-              spatz_req.op                    = VMINU;
-              spatz_req.op_arith.is_reduction = 1'b1;
-              // Switch vs1 and vs2
-              spatz_req.vs1                   = arith_s2;
-              spatz_req.vs2                   = arith_s1;
-            end
-
-            riscv_instr::VREDMAX_VS: begin
-              spatz_req.op                    = VMAX;
-              spatz_req.op_arith.is_reduction = 1'b1;
-              // Switch vs1 and vs2
-              spatz_req.vs1                   = arith_s2;
-              spatz_req.vs2                   = arith_s1;
-            end
-
-            riscv_instr::VREDMAXU_VS: begin
-              spatz_req.op                    = VMAXU;
-              spatz_req.op_arith.is_reduction = 1'b1;
-              // Switch vs1 and vs2
-              spatz_req.vs1                   = arith_s2;
-              spatz_req.vs2                   = arith_s1;
-            end
-
-            // Vector Shift
-            riscv_instr::VSLL_VV,
-            riscv_instr::VSLL_VX,
-            riscv_instr::VSLL_VI: begin
-              spatz_req.op = VSLL;
-              if (func3 == OPIVI) begin
-                spatz_req.rs1 = elen_t'(arith_s1);
+            // Decide which operands to use (vs1 or rs1 or imm)
+            unique case (func3)
+              OPIVV,
+              OPMVV: begin
+                spatz_req.use_vs1 = 1'b1;
+                spatz_req.vs1     = arith_s1;
               end
-            end
-
-            riscv_instr::VSRL_VV,
-            riscv_instr::VSRL_VX,
-            riscv_instr::VSRL_VI: begin
-              spatz_req.op = VSRL;
-              if (func3 == OPIVI) begin
-                spatz_req.rs1 = elen_t'(arith_s1);
+              OPIVI: begin
+                spatz_req.rs1 = elen_t'(signed'(arith_s1));
               end
-            end
-
-            riscv_instr::VSRA_VV,
-            riscv_instr::VSRA_VX,
-            riscv_instr::VSRA_VI: begin
-              spatz_req.op = VSRA;
-              if (func3 == OPIVI) begin
-                spatz_req.rs1 = elen_t'(arith_s1);
+              OPIVX,
+              OPMVX: begin
+                spatz_req.rs1 = decoder_req_i.rs1;
               end
-            end
+              default: illegal_instr = 1'b1;
+            endcase
 
-            // Vector Min/Max
-            riscv_instr::VMIN_VV,
-            riscv_instr::VMIN_VX: begin
-              spatz_req.op = VMIN;
-            end
-
-            riscv_instr::VMINU_VV,
-            riscv_instr::VMINU_VX: begin
-              spatz_req.op = VMINU;
-            end
-
-            riscv_instr::VMAX_VV,
-            riscv_instr::VMAX_VX: begin
-              spatz_req.op = VMAX;
-            end
-
-            riscv_instr::VMAXU_VV,
-            riscv_instr::VMAXU_VX: begin
-              spatz_req.op = VMAXU;
-            end
-
-            // Vector Comparison
-            riscv_instr::VMSEQ_VV,
-            riscv_instr::VMSEQ_VX,
-            riscv_instr::VMSEQ_VI: begin
-              spatz_req.op = VMSEQ;
-            end
-
-            riscv_instr::VMSNE_VV,
-            riscv_instr::VMSNE_VX,
-            riscv_instr::VMSNE_VI: begin
-              spatz_req.op = VMSNE;
-            end
-
-            riscv_instr::VMSLTU_VV,
-            riscv_instr::VMSLTU_VX: begin
-              spatz_req.op = VMSLTU;
-            end
-
-            riscv_instr::VMSLT_VV,
-            riscv_instr::VMSLT_VX: begin
-              spatz_req.op = VMSLT;
-            end
-
-            riscv_instr::VMSLEU_VV,
-            riscv_instr::VMSLEU_VX,
-            riscv_instr::VMSLEU_VI: begin
-              spatz_req.op = VMSLEU;
-            end
-
-            riscv_instr::VMSLE_VV,
-            riscv_instr::VMSLE_VX,
-            riscv_instr::VMSLE_VI: begin
-              spatz_req.op = VMSLE;
-            end
-
-            riscv_instr::VMSGTU_VX,
-            riscv_instr::VMSGTU_VI: begin
-              spatz_req.op = VMSGTU;
-            end
-
-            riscv_instr::VMSGT_VX,
-            riscv_instr::VMSGT_VI: begin
-              spatz_req.op = VMSGT;
-            end
-
-            // Vector Multiply
-            riscv_instr::VMUL_VV,
-            riscv_instr::VMUL_VX: begin
-              spatz_req.op = VMUL;
-            end
-
-            riscv_instr::VMULH_VV,
-            riscv_instr::VMULH_VX: begin
-              spatz_req.op = VMULH;
-            end
-
-            riscv_instr::VMULHU_VV,
-            riscv_instr::VMULHU_VX: begin
-              spatz_req.op = VMULHU;
-            end
-
-            riscv_instr::VMULHSU_VV,
-            riscv_instr::VMULHSU_VX: begin
-              spatz_req.op = VMULHSU;
-            end
-
-            // Vector Widening Multiply
-            riscv_instr::VWMUL_VV,
-            riscv_instr::VWMUL_VX: begin
-              spatz_req.op                  = VMUL;
-              spatz_req.op_arith.widen_vs1  = 1'b1;
-              spatz_req.op_arith.signed_vs1 = 1'b1;
-              spatz_req.op_arith.widen_vs2  = 1'b1;
-              spatz_req.op_arith.signed_vs2 = 1'b1;
-            end
-
-            riscv_instr::VWMULU_VV,
-            riscv_instr::VWMULU_VX: begin
-              spatz_req.op                 = VMUL;
-              spatz_req.op_arith.widen_vs1 = 1'b1;
-              spatz_req.op_arith.widen_vs2 = 1'b1;
-            end
-
-            riscv_instr::VWMULSU_VV,
-            riscv_instr::VWMULSU_VX: begin
-              spatz_req.op                  = VMUL;
-              spatz_req.op_arith.widen_vs1  = 1'b1;
-              spatz_req.op_arith.widen_vs2  = 1'b1;
-              spatz_req.op_arith.signed_vs2 = 1'b1;
-            end
-
-            // Vector Division
-            riscv_instr::VDIVU_VV,
-            riscv_instr::VDIVU_VX: begin
-              spatz_req.op = VDIVU;
-            end
-
-            riscv_instr::VDIV_VV,
-            riscv_instr::VDIV_VX: begin
-              spatz_req.op = VDIV;
-            end
-
-            riscv_instr::VREMU_VV,
-            riscv_instr::VREMU_VX: begin
-              spatz_req.op = VREMU;
-            end
-
-            riscv_instr::VREM_VV,
-            riscv_instr::VREM_VX: begin
-              spatz_req.op = VREM;
-            end
-
-            // Vector Multiply-Add
-            riscv_instr::VMACC_VV,
-            riscv_instr::VMACC_VX: begin
-              spatz_req.op        = VMACC;
-              spatz_req.vd_is_src = 1'b1;
-            end
-
-            riscv_instr::VNMSAC_VV,
-            riscv_instr::VNMSAC_VX: begin
-              spatz_req.op        = VNMSAC;
-              spatz_req.vd_is_src = 1'b1;
-            end
-
-            riscv_instr::VMADD_VV,
-            riscv_instr::VMADD_VX: begin
-              spatz_req.op        = VMADD;
-              spatz_req.vd_is_src = 1'b1;
-            end
-
-            riscv_instr::VNMSUB_VV,
-            riscv_instr::VNMSUB_VX: begin
-              spatz_req.op        = VNMSUB;
-              spatz_req.vd_is_src = 1'b1;
-            end
-
-            // Vector Widening Multiply-Add
-            riscv_instr::VWMACC_VV,
-            riscv_instr::VWMACC_VX: begin
-              spatz_req.op                  = VMACC;
-              spatz_req.vd_is_src           = 1'b1;
-              spatz_req.op_arith.widen_vs1  = 1'b1;
-              spatz_req.op_arith.signed_vs1 = 1'b1;
-              spatz_req.op_arith.widen_vs2  = 1'b1;
-              spatz_req.op_arith.signed_vs2 = 1'b1;
-            end
-
-            riscv_instr::VWMACCU_VV,
-            riscv_instr::VWMACCU_VX: begin
-              spatz_req.op                 = VMACC;
-              spatz_req.vd_is_src          = 1'b1;
-              spatz_req.op_arith.widen_vs1 = 1'b1;
-              spatz_req.op_arith.widen_vs2 = 1'b1;
-            end
-
-            riscv_instr::VWMACCSU_VV,
-            riscv_instr::VWMACCSU_VX: begin
-              spatz_req.op                  = VMACC;
-              spatz_req.vd_is_src           = 1'b1;
-              spatz_req.op_arith.widen_vs1  = 1'b1;
-              spatz_req.op_arith.signed_vs1 = 1'b1;
-              spatz_req.op_arith.widen_vs2  = 1'b1;
-            end
-
-            riscv_instr::VWMACCUS_VX: begin
-              spatz_req.op                  = VMACC;
-              spatz_req.vd_is_src           = 1'b1;
-              spatz_req.op_arith.widen_vs1  = 1'b1;
-              spatz_req.op_arith.widen_vs2  = 1'b1;
-              spatz_req.op_arith.signed_vs2 = 1'b1;
-            end
-
-            // Vector Merge
-            riscv_instr::VMERGE_VVM,
-            riscv_instr::VMERGE_VXM,
-            riscv_instr::VMERGE_VIM: begin
-              spatz_req.op = VMERGE;
-            end
-
-            riscv_instr::VMV_V_V,
-            riscv_instr::VMV_V_X,
-            riscv_instr::VMV_S_X,
-            riscv_instr::VMV_V_I: begin
-              // vmv is the same as a zero slide
-              spatz_req.op                 = VSLIDEUP;
-              spatz_req.ex_unit            = SLD;
-              spatz_req.op_sld.insert      = (func3 == OPIVI || func3 == OPIVX || func3 == OPMVX);
-              spatz_req.op_sld.vmv         = 1'b1;
-              spatz_req.vs2                = spatz_req.vs1;
-              spatz_req.use_vs2            = (func3 == OPIVV);
-              spatz_req.op_arith.is_scalar = decoder_req_i.instr inside {riscv_instr::VMV_S_X};
-            end
-
-            // Vector Slide
-            riscv_instr::VSLIDEUP_VX,
-            riscv_instr::VSLIDEUP_VI: begin
-              spatz_req.op      = VSLIDEUP;
-              spatz_req.ex_unit = SLD;
-              if (func3 == OPIVI) begin
-                spatz_req.rs1 = elen_t'(arith_s1);
+            // Check what arithmetic operation is requested
+            unique casez (decoder_req_i.instr)
+              // Vector Arithmetic
+              riscv_instr::VADD_VV,
+              riscv_instr::VADD_VX,
+              riscv_instr::VADD_VI: begin
+                spatz_req.op = VADD;
               end
-            end
 
-            riscv_instr::VSLIDE1UP_VX: begin
-              spatz_req.op            = VSLIDEUP;
-              spatz_req.op_sld.insert = 1'b1;
-              spatz_req.ex_unit       = SLD;
-              if (func3 == OPIVI) begin
-                spatz_req.rs1 = elen_t'(arith_s1);
+              riscv_instr::VSUB_VV,
+              riscv_instr::VSUB_VX: begin
+                spatz_req.op = VSUB;
               end
-            end
 
-            riscv_instr::VSLIDEDOWN_VX,
-            riscv_instr::VSLIDEDOWN_VI: begin
-              spatz_req.op      = VSLIDEDOWN;
-              spatz_req.ex_unit = SLD;
-              if (func3 == OPIVI) begin
-                spatz_req.rs1 = elen_t'(arith_s1);
+              riscv_instr::VRSUB_VX,
+              riscv_instr::VRSUB_VI: begin
+                spatz_req.op = VRSUB;
               end
-            end
 
-            riscv_instr::VSLIDE1DOWN_VX: begin
-              spatz_req.op            = VSLIDEDOWN;
-              spatz_req.op_sld.insert = 1'b1;
-              spatz_req.ex_unit       = SLD;
-              if (func3 == OPIVI) begin
-                spatz_req.rs1 = elen_t'(arith_s1);
+              // Vector Widening Arithmetic
+              riscv_instr::VWADD_VV,
+              riscv_instr::VWADD_VX: begin
+                spatz_req.op                  = VADD;
+                spatz_req.op_arith.widen_vs1  = 1'b1;
+                spatz_req.op_arith.signed_vs1 = 1'b1;
+                spatz_req.op_arith.widen_vs2  = 1'b1;
+                spatz_req.op_arith.signed_vs2 = 1'b1;
               end
-            end
 
-            default: illegal_instr = 1'b1;
-          endcase // Arithmetic Instruction Type
+              riscv_instr::VWADDU_VV,
+              riscv_instr::VWADDU_VX: begin
+                spatz_req.op                 = VADD;
+                spatz_req.op_arith.widen_vs1 = 1'b1;
+                spatz_req.op_arith.widen_vs2 = 1'b1;
+              end
+
+              riscv_instr::VWSUB_VV,
+              riscv_instr::VWSUB_VX: begin
+                spatz_req.op                  = VSUB;
+                spatz_req.op_arith.widen_vs1  = 1'b1;
+                spatz_req.op_arith.signed_vs1 = 1'b1;
+                spatz_req.op_arith.widen_vs2  = 1'b1;
+                spatz_req.op_arith.signed_vs2 = 1'b1;
+              end
+
+              riscv_instr::VWSUBU_VV,
+              riscv_instr::VWSUBU_VX: begin
+                spatz_req.op                 = VSUB;
+                spatz_req.op_arith.widen_vs1 = 1'b1;
+                spatz_req.op_arith.widen_vs2 = 1'b1;
+              end
+
+              // Vector Logic
+              riscv_instr::VAND_VV,
+              riscv_instr::VAND_VX,
+              riscv_instr::VAND_VI: begin
+                spatz_req.op = VAND;
+              end
+
+              riscv_instr::VOR_VV,
+              riscv_instr::VOR_VX,
+              riscv_instr::VOR_VI: begin
+                spatz_req.op = VOR;
+              end
+
+              riscv_instr::VXOR_VV,
+              riscv_instr::VXOR_VX,
+              riscv_instr::VXOR_VI: begin
+                spatz_req.op = VXOR;
+              end
+
+              // Vector Arithmetic with Carry
+              riscv_instr::VADC_VVM,
+              riscv_instr::VADC_VXM,
+              riscv_instr::VADC_VIM: begin
+                spatz_req.op = VADC;
+              end
+
+              riscv_instr::VMADC_VV,
+              riscv_instr::VMADC_VX,
+              riscv_instr::VMADC_VI: begin
+                spatz_req.op = VMADC;
+              end
+
+              riscv_instr::VMADC_VVM,
+              riscv_instr::VMADC_VXM,
+              riscv_instr::VMADC_VIM: begin
+                spatz_req.op                           = VMADC;
+                spatz_req.op_arith.use_carry_borrow_in = 1'b1;
+              end
+
+              riscv_instr::VSBC_VVM,
+              riscv_instr::VSBC_VXM: begin
+                spatz_req.op = VSBC;
+              end
+
+              riscv_instr::VMSBC_VV,
+              riscv_instr::VMSBC_VX: begin
+                spatz_req.op = VMSBC;
+              end
+
+              riscv_instr::VMSBC_VVM,
+              riscv_instr::VMSBC_VXM: begin
+                spatz_req.op                           = VMSBC;
+                spatz_req.op_arith.use_carry_borrow_in = 1'b1;
+              end
+
+              // Reductions
+              riscv_instr::VREDSUM_VS: begin
+                spatz_req.op                    = VADD;
+                spatz_req.op_arith.is_reduction = 1'b1;
+                // Switch vs1 and vs2
+                spatz_req.vs1                   = arith_s2;
+                spatz_req.vs2                   = arith_s1;
+              end
+
+              riscv_instr::VREDAND_VS: begin
+                spatz_req.op                    = VAND;
+                spatz_req.op_arith.is_reduction = 1'b1;
+                // Switch vs1 and vs2
+                spatz_req.vs1                   = arith_s2;
+                spatz_req.vs2                   = arith_s1;
+              end
+
+              riscv_instr::VREDOR_VS: begin
+                spatz_req.op                    = VOR;
+                spatz_req.op_arith.is_reduction = 1'b1;
+                // Switch vs1 and vs2
+                spatz_req.vs1                   = arith_s2;
+                spatz_req.vs2                   = arith_s1;
+              end
+
+              riscv_instr::VREDXOR_VS: begin
+                spatz_req.op                    = VXOR;
+                spatz_req.op_arith.is_reduction = 1'b1;
+                // Switch vs1 and vs2
+                spatz_req.vs1                   = arith_s2;
+                spatz_req.vs2                   = arith_s1;
+              end
+
+              riscv_instr::VREDMIN_VS: begin
+                spatz_req.op                    = VMIN;
+                spatz_req.op_arith.is_reduction = 1'b1;
+                // Switch vs1 and vs2
+                spatz_req.vs1                   = arith_s2;
+                spatz_req.vs2                   = arith_s1;
+              end
+
+              riscv_instr::VREDMINU_VS: begin
+                spatz_req.op                    = VMINU;
+                spatz_req.op_arith.is_reduction = 1'b1;
+                // Switch vs1 and vs2
+                spatz_req.vs1                   = arith_s2;
+                spatz_req.vs2                   = arith_s1;
+              end
+
+              riscv_instr::VREDMAX_VS: begin
+                spatz_req.op                    = VMAX;
+                spatz_req.op_arith.is_reduction = 1'b1;
+                // Switch vs1 and vs2
+                spatz_req.vs1                   = arith_s2;
+                spatz_req.vs2                   = arith_s1;
+              end
+
+              riscv_instr::VREDMAXU_VS: begin
+                spatz_req.op                    = VMAXU;
+                spatz_req.op_arith.is_reduction = 1'b1;
+                // Switch vs1 and vs2
+                spatz_req.vs1                   = arith_s2;
+                spatz_req.vs2                   = arith_s1;
+              end
+
+              // Vector Shift
+              riscv_instr::VSLL_VV,
+              riscv_instr::VSLL_VX,
+              riscv_instr::VSLL_VI: begin
+                spatz_req.op = VSLL;
+                if (func3 == OPIVI) begin
+                  spatz_req.rs1 = elen_t'(arith_s1);
+                end
+              end
+
+              riscv_instr::VSRL_VV,
+              riscv_instr::VSRL_VX,
+              riscv_instr::VSRL_VI: begin
+                spatz_req.op = VSRL;
+                if (func3 == OPIVI) begin
+                  spatz_req.rs1 = elen_t'(arith_s1);
+                end
+              end
+
+              riscv_instr::VSRA_VV,
+              riscv_instr::VSRA_VX,
+              riscv_instr::VSRA_VI: begin
+                spatz_req.op = VSRA;
+                if (func3 == OPIVI) begin
+                  spatz_req.rs1 = elen_t'(arith_s1);
+                end
+              end
+
+              // Vector Min/Max
+              riscv_instr::VMIN_VV,
+              riscv_instr::VMIN_VX: begin
+                spatz_req.op = VMIN;
+              end
+
+              riscv_instr::VMINU_VV,
+              riscv_instr::VMINU_VX: begin
+                spatz_req.op = VMINU;
+              end
+
+              riscv_instr::VMAX_VV,
+              riscv_instr::VMAX_VX: begin
+                spatz_req.op = VMAX;
+              end
+
+              riscv_instr::VMAXU_VV,
+              riscv_instr::VMAXU_VX: begin
+                spatz_req.op = VMAXU;
+              end
+
+              // Vector Comparison
+              riscv_instr::VMSEQ_VV,
+              riscv_instr::VMSEQ_VX,
+              riscv_instr::VMSEQ_VI: begin
+                spatz_req.op = VMSEQ;
+              end
+
+              riscv_instr::VMSNE_VV,
+              riscv_instr::VMSNE_VX,
+              riscv_instr::VMSNE_VI: begin
+                spatz_req.op = VMSNE;
+              end
+
+              riscv_instr::VMSLTU_VV,
+              riscv_instr::VMSLTU_VX: begin
+                spatz_req.op = VMSLTU;
+              end
+
+              riscv_instr::VMSLT_VV,
+              riscv_instr::VMSLT_VX: begin
+                spatz_req.op = VMSLT;
+              end
+
+              riscv_instr::VMSLEU_VV,
+              riscv_instr::VMSLEU_VX,
+              riscv_instr::VMSLEU_VI: begin
+                spatz_req.op = VMSLEU;
+              end
+
+              riscv_instr::VMSLE_VV,
+              riscv_instr::VMSLE_VX,
+              riscv_instr::VMSLE_VI: begin
+                spatz_req.op = VMSLE;
+              end
+
+              riscv_instr::VMSGTU_VX,
+              riscv_instr::VMSGTU_VI: begin
+                spatz_req.op = VMSGTU;
+              end
+
+              riscv_instr::VMSGT_VX,
+              riscv_instr::VMSGT_VI: begin
+                spatz_req.op = VMSGT;
+              end
+
+              // Vector Multiply
+              riscv_instr::VMUL_VV,
+              riscv_instr::VMUL_VX: begin
+                spatz_req.op = VMUL;
+              end
+
+              riscv_instr::VMULH_VV,
+              riscv_instr::VMULH_VX: begin
+                spatz_req.op = VMULH;
+              end
+
+              riscv_instr::VMULHU_VV,
+              riscv_instr::VMULHU_VX: begin
+                spatz_req.op = VMULHU;
+              end
+
+              riscv_instr::VMULHSU_VV,
+              riscv_instr::VMULHSU_VX: begin
+                spatz_req.op = VMULHSU;
+              end
+
+              // Vector Widening Multiply
+              riscv_instr::VWMUL_VV,
+              riscv_instr::VWMUL_VX: begin
+                spatz_req.op                  = VMUL;
+                spatz_req.op_arith.widen_vs1  = 1'b1;
+                spatz_req.op_arith.signed_vs1 = 1'b1;
+                spatz_req.op_arith.widen_vs2  = 1'b1;
+                spatz_req.op_arith.signed_vs2 = 1'b1;
+              end
+
+              riscv_instr::VWMULU_VV,
+              riscv_instr::VWMULU_VX: begin
+                spatz_req.op                 = VMUL;
+                spatz_req.op_arith.widen_vs1 = 1'b1;
+                spatz_req.op_arith.widen_vs2 = 1'b1;
+              end
+
+              riscv_instr::VWMULSU_VV,
+              riscv_instr::VWMULSU_VX: begin
+                spatz_req.op                  = VMUL;
+                spatz_req.op_arith.widen_vs1  = 1'b1;
+                spatz_req.op_arith.widen_vs2  = 1'b1;
+                spatz_req.op_arith.signed_vs2 = 1'b1;
+              end
+
+              // Vector Division
+              riscv_instr::VDIVU_VV,
+              riscv_instr::VDIVU_VX: begin
+                spatz_req.op = VDIVU;
+              end
+
+              riscv_instr::VDIV_VV,
+              riscv_instr::VDIV_VX: begin
+                spatz_req.op = VDIV;
+              end
+
+              riscv_instr::VREMU_VV,
+              riscv_instr::VREMU_VX: begin
+                spatz_req.op = VREMU;
+              end
+
+              riscv_instr::VREM_VV,
+              riscv_instr::VREM_VX: begin
+                spatz_req.op = VREM;
+              end
+
+              // Vector Multiply-Add
+              riscv_instr::VMACC_VV,
+              riscv_instr::VMACC_VX: begin
+                spatz_req.op        = VMACC;
+                spatz_req.vd_is_src = 1'b1;
+              end
+
+              riscv_instr::VNMSAC_VV,
+              riscv_instr::VNMSAC_VX: begin
+                spatz_req.op        = VNMSAC;
+                spatz_req.vd_is_src = 1'b1;
+              end
+
+              riscv_instr::VMADD_VV,
+              riscv_instr::VMADD_VX: begin
+                spatz_req.op        = VMADD;
+                spatz_req.vd_is_src = 1'b1;
+              end
+
+              riscv_instr::VNMSUB_VV,
+              riscv_instr::VNMSUB_VX: begin
+                spatz_req.op        = VNMSUB;
+                spatz_req.vd_is_src = 1'b1;
+              end
+
+              // Vector Widening Multiply-Add
+              riscv_instr::VWMACC_VV,
+              riscv_instr::VWMACC_VX: begin
+                spatz_req.op                  = VMACC;
+                spatz_req.vd_is_src           = 1'b1;
+                spatz_req.op_arith.widen_vs1  = 1'b1;
+                spatz_req.op_arith.signed_vs1 = 1'b1;
+                spatz_req.op_arith.widen_vs2  = 1'b1;
+                spatz_req.op_arith.signed_vs2 = 1'b1;
+              end
+
+              riscv_instr::VWMACCU_VV,
+              riscv_instr::VWMACCU_VX: begin
+                spatz_req.op                 = VMACC;
+                spatz_req.vd_is_src          = 1'b1;
+                spatz_req.op_arith.widen_vs1 = 1'b1;
+                spatz_req.op_arith.widen_vs2 = 1'b1;
+              end
+
+              riscv_instr::VWMACCSU_VV,
+              riscv_instr::VWMACCSU_VX: begin
+                spatz_req.op                  = VMACC;
+                spatz_req.vd_is_src           = 1'b1;
+                spatz_req.op_arith.widen_vs1  = 1'b1;
+                spatz_req.op_arith.signed_vs1 = 1'b1;
+                spatz_req.op_arith.widen_vs2  = 1'b1;
+              end
+
+              riscv_instr::VWMACCUS_VX: begin
+                spatz_req.op                  = VMACC;
+                spatz_req.vd_is_src           = 1'b1;
+                spatz_req.op_arith.widen_vs1  = 1'b1;
+                spatz_req.op_arith.widen_vs2  = 1'b1;
+                spatz_req.op_arith.signed_vs2 = 1'b1;
+              end
+
+              // Vector Merge
+              riscv_instr::VMERGE_VVM,
+              riscv_instr::VMERGE_VXM,
+              riscv_instr::VMERGE_VIM: begin
+                spatz_req.op = VMERGE;
+              end
+
+              riscv_instr::VMV_V_V,
+              riscv_instr::VMV_V_X,
+              riscv_instr::VMV_S_X,
+              riscv_instr::VMV_V_I: begin
+                // vmv is the same as a zero slide
+                spatz_req.op                 = VSLIDEUP;
+                spatz_req.ex_unit            = SLD;
+                spatz_req.op_sld.insert      = (func3 == OPIVI || func3 == OPIVX || func3 == OPMVX);
+                spatz_req.op_sld.vmv         = 1'b1;
+                spatz_req.vs2                = spatz_req.vs1;
+                spatz_req.use_vs2            = (func3 == OPIVV);
+                spatz_req.op_arith.is_scalar = decoder_req_i.instr inside {riscv_instr::VMV_S_X};
+              end
+
+              // Vector Slide
+              riscv_instr::VSLIDEUP_VX,
+              riscv_instr::VSLIDEUP_VI: begin
+                spatz_req.op      = VSLIDEUP;
+                spatz_req.ex_unit = SLD;
+                if (func3 == OPIVI) begin
+                  spatz_req.rs1 = elen_t'(arith_s1);
+                end
+              end
+
+              riscv_instr::VSLIDE1UP_VX: begin
+                spatz_req.op            = VSLIDEUP;
+                spatz_req.op_sld.insert = 1'b1;
+                spatz_req.ex_unit       = SLD;
+                if (func3 == OPIVI) begin
+                  spatz_req.rs1 = elen_t'(arith_s1);
+                end
+              end
+
+              riscv_instr::VSLIDEDOWN_VX,
+              riscv_instr::VSLIDEDOWN_VI: begin
+                spatz_req.op      = VSLIDEDOWN;
+                spatz_req.ex_unit = SLD;
+                if (func3 == OPIVI) begin
+                  spatz_req.rs1 = elen_t'(arith_s1);
+                end
+              end
+
+              riscv_instr::VSLIDE1DOWN_VX: begin
+                spatz_req.op            = VSLIDEDOWN;
+                spatz_req.op_sld.insert = 1'b1;
+                spatz_req.ex_unit       = SLD;
+                if (func3 == OPIVI) begin
+                  spatz_req.rs1 = elen_t'(arith_s1);
+                end
+              end
+
+              default: illegal_instr = 1'b1;
+            endcase // Arithmetic Instruction Type
+          end else
+            illegal_instr = 1'b1;
         end
 
         // Move to the scalar RF
         riscv_instr::VMV_X_S: begin
-          automatic vreg_t arith_s2 = decoder_req_i.instr[24:20];
-          automatic vreg_t arith_d  = decoder_req_i.instr[11:7];
+          if(decode_vfu) begin
+            automatic vreg_t arith_s2 = decoder_req_i.instr[24:20];
+            automatic vreg_t arith_d  = decoder_req_i.instr[11:7];
 
-          spatz_req.op                 = VADD;
-          spatz_req.ex_unit            = VFU;
-          spatz_req.rd                 = arith_d;
-          spatz_req.use_rd             = 1'b1;
-          spatz_req.vs2                = arith_s2;
-          spatz_req.use_vs2            = 1'b1;
-          spatz_req.op_arith.is_scalar = 1'b1;
+            spatz_req.op                 = VADD;
+            spatz_req.ex_unit            = VFU;
+            spatz_req.rd                 = arith_d;
+            spatz_req.use_rd             = 1'b1;
+            spatz_req.vs2                = arith_s2;
+            spatz_req.use_vs2            = 1'b1;
+            spatz_req.op_arith.is_scalar = 1'b1;
+          end else
+            illegal_instr = 1'b1;
         end
 
         // Vector floating-point instructions
@@ -930,7 +942,7 @@ module spatz_decoder
         riscv_instr::VFWNMSAC_VF,
         riscv_instr::VFSLIDE1UP_VF,
         riscv_instr::VFSLIDE1DOWN_VF: begin
-          if (spatz_pkg::FPU) begin
+          if (spatz_pkg::FPU && (decode_vfu || decode_vsldu)) begin
             automatic opcodev_func3_e func3 = opcodev_func3_e'(decoder_req_i.instr[14:12]);
             automatic vreg_t arith_s1       = decoder_req_i.instr[19:15];
             automatic vreg_t arith_s2       = decoder_req_i.instr[24:20];
@@ -1261,12 +1273,13 @@ module spatz_decoder
 
               default;
             endcase
-          end
+          end else
+            illegal_instr = 1'b1;
         end
 
         // Move to the scalar FP RF
         riscv_instr::VFMV_F_S: begin
-          if (spatz_pkg::FPU) begin
+          if (spatz_pkg::FPU && decode_vfu) begin
             automatic vreg_t arith_s2 = decoder_req_i.instr[24:20];
             automatic vreg_t arith_d  = decoder_req_i.instr[11:7];
 
@@ -1287,22 +1300,25 @@ module spatz_decoder
         riscv_instr::MULH,
         riscv_instr::MULHU,
         riscv_instr::MULHSU: begin
-          spatz_req.ex_unit            = VFU;
-          spatz_req.rd                 = decoder_req_i.instr[11:7];
-          spatz_req.use_rd             = 1'b1;
-          // Switch rs2 and rs1
-          spatz_req.rs1                = decoder_req_i.rs2;
-          spatz_req.rs2                = decoder_req_i.rs1;
-          spatz_req.vtype.vsew         = EW_32;
-          spatz_req.op_arith.is_scalar = 1'b1;
+          if(decode_vfu) begin
+            spatz_req.ex_unit            = VFU;
+            spatz_req.rd                 = decoder_req_i.instr[11:7];
+            spatz_req.use_rd             = 1'b1;
+            // Switch rs2 and rs1
+            spatz_req.rs1                = decoder_req_i.rs2;
+            spatz_req.rs2                = decoder_req_i.rs1;
+            spatz_req.vtype.vsew         = EW_32;
+            spatz_req.op_arith.is_scalar = 1'b1;
 
-          unique casez (decoder_req_i.instr)
-            riscv_instr::MUL   : spatz_req.op = VMUL;
-            riscv_instr::MULH  : spatz_req.op = VMULH;
-            riscv_instr::MULHU : spatz_req.op = VMULHU;
-            riscv_instr::MULHSU: spatz_req.op = VMULHSU;
-            default;
-          endcase
+            unique casez (decoder_req_i.instr)
+              riscv_instr::MUL   : spatz_req.op = VMUL;
+              riscv_instr::MULH  : spatz_req.op = VMULH;
+              riscv_instr::MULHU : spatz_req.op = VMULHU;
+              riscv_instr::MULHSU: spatz_req.op = VMULHSU;
+              default;
+            endcase
+          end else
+            illegal_instr = 1'b1;
         end
 
         // Scalar division
@@ -1310,232 +1326,28 @@ module spatz_decoder
         riscv_instr::DIVU,
         riscv_instr::REM,
         riscv_instr::REMU: begin
-          spatz_req.ex_unit            = VFU;
-          spatz_req.rd                 = decoder_req_i.instr[11:7];
-          spatz_req.use_rd             = 1'b1;
-          // Switch rs2 and rs1
-          spatz_req.rs1                = decoder_req_i.rs2;
-          spatz_req.rs2                = decoder_req_i.rs1;
-          spatz_req.vtype.vsew         = EW_32;
-          spatz_req.op_arith.is_scalar = 1'b1;
-
-          unique casez (decoder_req_i.instr)
-            riscv_instr::DIV : spatz_req.op = VDIV;
-            riscv_instr::DIVU: spatz_req.op = VDIVU;
-            riscv_instr::REM : spatz_req.op = VREM;
-            riscv_instr::REMU: spatz_req.op = VREMU;
-            default;
-          endcase
-        end
-
-        // Scalar byte-precision floating-point instructions
-        riscv_instr::FADD_B,
-        riscv_instr::FSUB_B,
-        riscv_instr::FMUL_B,
-        riscv_instr::FSGNJ_B,
-        riscv_instr::FSGNJN_B,
-        riscv_instr::FSGNJX_B,
-        riscv_instr::FMIN_B,
-        riscv_instr::FMAX_B,
-        riscv_instr::FCLASS_B,
-        riscv_instr::FLE_B,
-        riscv_instr::FLT_B,
-        riscv_instr::FEQ_B,
-        riscv_instr::FCVT_B_W,
-        riscv_instr::FCVT_B_WU,
-        riscv_instr::FCVT_W_B,
-        riscv_instr::FCVT_WU_B,
-        riscv_instr::FMADD_B,
-        riscv_instr::FMSUB_B,
-        riscv_instr::FNMSUB_B,
-        riscv_instr::FNMADD_B,
-        riscv_instr::FCVT_B_H,
-        riscv_instr::FCVT_H_B: begin
-          if (spatz_pkg::FPU && spatz_pkg::RVF) begin
+          if(decode_vfu) begin
             spatz_req.ex_unit            = VFU;
             spatz_req.rd                 = decoder_req_i.instr[11:7];
             spatz_req.use_rd             = 1'b1;
-            spatz_req.rs1                = decoder_req_i.rs1;
-            spatz_req.rs2                = decoder_req_i.rs2;
-            spatz_req.rsd                = decoder_req_i.rsd;
+            // Switch rs2 and rs1
+            spatz_req.rs1                = decoder_req_i.rs2;
+            spatz_req.rs2                = decoder_req_i.rs1;
+            spatz_req.vtype.vsew         = EW_32;
             spatz_req.op_arith.is_scalar = 1'b1;
-            spatz_req.rm                 = fpu_rnd_mode_i;
-            spatz_req.fm                 = fpu_fmt_mode_i;
-            spatz_req.vtype.vsew         = EW_8;
 
             unique casez (decoder_req_i.instr)
-              riscv_instr::FADD_B : spatz_req.op = VFADD;
-              riscv_instr::FSUB_B : begin
-                spatz_req.op  = VFSUB;
-                spatz_req.rs1 = decoder_req_i.rs2;
-                spatz_req.rs2 = decoder_req_i.rs1;
-              end
-              riscv_instr::FMUL_B  : spatz_req.op = VFMUL;
-              riscv_instr::FSGNJ_B : begin
-                spatz_req.op = VFSGNJ;
-                spatz_req.rm = fpnew_pkg::RNE;
-              end
-              riscv_instr::FSGNJN_B : begin
-                spatz_req.op = VFSGNJ;
-                spatz_req.rm = fpnew_pkg::RTZ;
-              end
-              riscv_instr::FSGNJX_B : begin
-                spatz_req.op = VFSGNJ;
-                spatz_req.rm = fpnew_pkg::RDN;
-              end
-              riscv_instr::FMIN_B : begin
-                spatz_req.op = VFMINMAX;
-                spatz_req.rm = fpnew_pkg::RNE;
-              end
-              riscv_instr::FMAX_B : begin
-                spatz_req.op = VFMINMAX;
-                spatz_req.rm = fpnew_pkg::RTZ;
-              end
-              riscv_instr::FCLASS_B : spatz_req.op = VFCLASS;
-              riscv_instr::FLE_B    : begin
-                spatz_req.op = VFCMP;
-                spatz_req.rm = fpnew_pkg::RNE;
-              end
-              riscv_instr::FLT_B : begin
-                spatz_req.op = VFCMP;
-                spatz_req.rm = fpnew_pkg::RTZ;
-              end
-              riscv_instr::FEQ_B : begin
-                spatz_req.op = VFCMP;
-                spatz_req.rm = fpnew_pkg::RDN;
-              end
-              riscv_instr::FCVT_B_W : spatz_req.op = VI2F;
-              riscv_instr::FCVT_B_WU: spatz_req.op = VU2F;
-              riscv_instr::FCVT_W_B : begin
-                spatz_req.op = VF2I;
-                spatz_req.rm = fpnew_pkg::roundmode_e'(decoder_req_i.instr[14:12]);
-              end
-              riscv_instr::FCVT_WU_B: begin
-                spatz_req.op = VF2U;
-                spatz_req.rm = fpnew_pkg::roundmode_e'(decoder_req_i.instr[14:12]);
-              end
-              riscv_instr::FCVT_H_B : begin
-                spatz_req.op                 = VF2F;
-                spatz_req.op_arith.widen_vs1 = 1'b1;
-              end
-              riscv_instr::FCVT_B_H : begin
-                spatz_req.op                    = VF2F;
-                spatz_req.op_arith.is_narrowing = 1'b1;
-              end
-              riscv_instr::FMADD_B  : spatz_req.op = VFMADD;
-              riscv_instr::FMSUB_B  : spatz_req.op = VFMSUB;
-              riscv_instr::FNMADD_B : spatz_req.op = VFNMADD;
-              riscv_instr::FNMSUB_B : spatz_req.op = VFNMSUB;
+              riscv_instr::DIV : spatz_req.op = VDIV;
+              riscv_instr::DIVU: spatz_req.op = VDIVU;
+              riscv_instr::REM : spatz_req.op = VREM;
+              riscv_instr::REMU: spatz_req.op = VREMU;
               default;
             endcase
           end else
             illegal_instr = 1'b1;
         end
 
-        // Scalar half-precision floating-point instructions
-        riscv_instr::FADD_H,
-        riscv_instr::FSUB_H,
-        riscv_instr::FMUL_H,
-        riscv_instr::FSGNJ_H,
-        riscv_instr::FSGNJN_H,
-        riscv_instr::FSGNJX_H,
-        riscv_instr::FMIN_H,
-        riscv_instr::FMAX_H,
-        riscv_instr::FCLASS_H,
-        riscv_instr::FLE_H,
-        riscv_instr::FLT_H,
-        riscv_instr::FEQ_H,
-        riscv_instr::FCVT_H_W,
-        riscv_instr::FCVT_H_WU,
-        riscv_instr::FCVT_W_H,
-        riscv_instr::FCVT_WU_H,
-        riscv_instr::FMADD_H,
-        riscv_instr::FMSUB_H,
-        riscv_instr::FNMSUB_H,
-        riscv_instr::FNMADD_H,
-        riscv_instr::FCVT_H_S,
-        riscv_instr::FCVT_S_H: begin
-          if (spatz_pkg::FPU && spatz_pkg::RVF) begin
-            spatz_req.ex_unit            = VFU;
-            spatz_req.rd                 = decoder_req_i.instr[11:7];
-            spatz_req.use_rd             = 1'b1;
-            spatz_req.rs1                = decoder_req_i.rs1;
-            spatz_req.rs2                = decoder_req_i.rs2;
-            spatz_req.rsd                = decoder_req_i.rsd;
-            spatz_req.op_arith.is_scalar = 1'b1;
-            spatz_req.rm                 = fpu_rnd_mode_i;
-            spatz_req.fm                 = fpu_fmt_mode_i;
-            spatz_req.vtype.vsew         = EW_16;
-
-            unique casez (decoder_req_i.instr)
-              riscv_instr::FADD_H : spatz_req.op = VFADD;
-              riscv_instr::FSUB_H : begin
-                spatz_req.op  = VFSUB;
-                spatz_req.rs1 = decoder_req_i.rs2;
-                spatz_req.rs2 = decoder_req_i.rs1;
-              end
-              riscv_instr::FMUL_H  : spatz_req.op = VFMUL;
-              riscv_instr::FSGNJ_H : begin
-                spatz_req.op = VFSGNJ;
-                spatz_req.rm = fpnew_pkg::RNE;
-              end
-              riscv_instr::FSGNJN_H : begin
-                spatz_req.op = VFSGNJ;
-                spatz_req.rm = fpnew_pkg::RTZ;
-              end
-              riscv_instr::FSGNJX_H : begin
-                spatz_req.op = VFSGNJ;
-                spatz_req.rm = fpnew_pkg::RDN;
-              end
-              riscv_instr::FMIN_H : begin
-                spatz_req.op = VFMINMAX;
-                spatz_req.rm = fpnew_pkg::RNE;
-              end
-              riscv_instr::FMAX_H : begin
-                spatz_req.op = VFMINMAX;
-                spatz_req.rm = fpnew_pkg::RTZ;
-              end
-              riscv_instr::FCLASS_H : spatz_req.op = VFCLASS;
-              riscv_instr::FLE_H    : begin
-                spatz_req.op = VFCMP;
-                spatz_req.rm = fpnew_pkg::RNE;
-              end
-              riscv_instr::FLT_H : begin
-                spatz_req.op = VFCMP;
-                spatz_req.rm = fpnew_pkg::RTZ;
-              end
-              riscv_instr::FEQ_H : begin
-                spatz_req.op = VFCMP;
-                spatz_req.rm = fpnew_pkg::RDN;
-              end
-              riscv_instr::FCVT_H_W : spatz_req.op = VI2F;
-              riscv_instr::FCVT_H_WU: spatz_req.op = VU2F;
-              riscv_instr::FCVT_W_H : begin
-                spatz_req.op = VF2I;
-                spatz_req.rm = fpnew_pkg::roundmode_e'(decoder_req_i.instr[14:12]);
-              end
-              riscv_instr::FCVT_WU_H: begin
-                spatz_req.op = VF2U;
-                spatz_req.rm = fpnew_pkg::roundmode_e'(decoder_req_i.instr[14:12]);
-              end
-              riscv_instr::FCVT_S_H : begin
-                spatz_req.op                 = VF2F;
-                spatz_req.op_arith.widen_vs1 = 1'b1;
-              end
-              riscv_instr::FCVT_H_S : begin
-                spatz_req.op                    = VF2F;
-                spatz_req.op_arith.is_narrowing = 1'b1;
-              end
-
-              riscv_instr::FMADD_H  : spatz_req.op = VFMADD;
-              riscv_instr::FMSUB_H  : spatz_req.op = VFMSUB;
-              riscv_instr::FNMADD_H : spatz_req.op = VFNMADD;
-              riscv_instr::FNMSUB_H : spatz_req.op = VFNMSUB;
-              default;
-            endcase
-          end else
-            illegal_instr = 1'b1;
-        end
+       
 
         // Scalar single-precision floating-point instructions
         riscv_instr::FADD_S,
@@ -1560,7 +1372,7 @@ module spatz_decoder
         riscv_instr::FNMADD_S,
         riscv_instr::FCVT_S_D,
         riscv_instr::FCVT_D_S: begin
-          if (spatz_pkg::FPU && spatz_pkg::RVF) begin
+          if (spatz_pkg::FPU && spatz_pkg::RVF && decode_vfu) begin
             spatz_req.ex_unit            = VFU;
             spatz_req.rd                 = decoder_req_i.instr[11:7];
             spatz_req.use_rd             = 1'b1;
@@ -1663,7 +1475,7 @@ module spatz_decoder
         riscv_instr::FMSUB_D,
         riscv_instr::FNMSUB_D,
         riscv_instr::FNMADD_D: begin
-          if (spatz_pkg::FPU && spatz_pkg::RVD) begin
+          if (spatz_pkg::FPU && spatz_pkg::RVD && decode_vfu) begin
             spatz_req.ex_unit            = VFU;
             spatz_req.rd                 = decoder_req_i.instr[11:7];
             spatz_req.use_rd             = 1'b1;

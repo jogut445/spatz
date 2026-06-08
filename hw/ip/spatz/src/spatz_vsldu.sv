@@ -9,7 +9,9 @@
 module spatz_vsldu
   import spatz_pkg::*;
   import rvv_pkg::*;
-  import cf_math_pkg::idx_width; (
+  import cf_math_pkg::idx_width; #(
+    parameter bit SIMD = 1'b0
+  ) (
     input  logic             clk_i,
     input  logic             rst_ni,
     // Spatz request
@@ -375,9 +377,23 @@ module spatz_vsldu
       end else begin
         data_in = vrf_rdata_i;
 
-        // If we are already over the MAXVL, all continuing elements are zero
-        if ((vreg_counter_q >= MAXVL - slide_amount_q) || (vreg_operation_last && spatz_req.op_sld.insert))
-          data_in = '0;
+        if (SIMD) begin
+          // Zero source elements that lie beyond the instruction's vl.
+          // The slide_down read word index = counter_word + slide_word_offset + (prefetch ? 0 : 1).
+          // If its byte start >= spatz_req.vl the source is all zeros (replaces the old
+          // MAXVL constant which is too large in single-word SIMD mode).
+          automatic vlen_t rd_word_byte_start;
+          rd_word_byte_start = vlen_t'(
+            (vreg_counter_q[$bits(vlen_t)-1:$clog2(VRFWordBWidth)]
+             + slide_amount_q[$bits(vlen_t)-1:$clog2(VRFWordBWidth)]
+             + (prefetch_q ? vlen_t'(0) : vlen_t'(1))) << $clog2(VRFWordBWidth));
+          if (rd_word_byte_start >= spatz_req.vl || (vreg_operation_last && spatz_req.op_sld.insert))
+            data_in = '0;
+        end else begin
+          // If we are already over the MAXVL, all continuing elements are zero
+          if ((vreg_counter_q >= MAXVL - slide_amount_q) || (vreg_operation_last && spatz_req.op_sld.insert))
+            data_in = '0;
+        end
       end
 
       // Shift direct elements into the correct position
@@ -433,6 +449,11 @@ module spatz_vsldu
       if (vreg_operation_first && is_slide_up)
         for (int i = 0; i < VRFWordBWidth; i++)
           vrf_req_d.wbe[i] = (spatz_req.op_sld.insert || (i >= slide_amount_d[$clog2(VRFWordBWidth)-1:0])) & (i < (vreg_counter_q[$clog2(VRFWordBWidth)-1:0] + vreg_counter_delta));
+
+      // vmv.s.x writes only element 0; restrict wbe to the first SEW bytes.
+      if (SIMD && is_slide_up && spatz_req.op_sld.vmv && spatz_req.op_sld.insert && spatz_req.op_arith.is_scalar)
+        for (int i = 0; i < VRFWordBWidth; i++)
+          vrf_req_d.wbe[i] = (i < (1 << spatz_req.vtype.vsew));
     end
 
     // Reset overflow register when finished

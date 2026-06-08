@@ -16,6 +16,7 @@ module spatz_controller
   #(
     parameter int  unsigned NrVregfilePorts   = 1,
     parameter int  unsigned NrWritePorts      = 1,
+    parameter int  unsigned NrReadPorts       = 1,
     parameter bit           RegisterRsp       = 0,
     parameter type          spatz_issue_req_t = logic,
     parameter type          spatz_issue_rsp_t = logic,
@@ -53,8 +54,10 @@ module spatz_controller
     // VRF Scoreboard
     input  logic             [NrVregfilePorts-1:0] sb_enable_i,
     input  logic             [NrWritePorts-1:0]    sb_wrote_result_i,
+    input  logic             [NrReadPorts-1:0]     sb_read_result_i,
     output logic             [NrVregfilePorts-1:0] sb_enable_o,
-    input  spatz_id_t        [NrVregfilePorts-1:0] sb_id_i
+    input  spatz_id_t        [NrVregfilePorts-1:0] sb_id_i,
+    output logic  running_instrs_o //Signal that there are instructions running in Spatz
   );
 
 // Include FF
@@ -258,7 +261,9 @@ module spatz_controller
   logic [NrParallelInstructions-1:0] wrote_result_q, wrote_result_d;
 `endif
 
+  logic [NrParallelInstructions-1:0] read_result_q, read_result_d;
   `FF(wrote_result_q, wrote_result_d, '0)
+  `FF(read_result_q, read_result_d, '0)
 
   // Is this instruction a narrowing or widening instruction?
   logic [NrParallelInstructions-1:0] narrow_wide_q, narrow_wide_d;
@@ -278,6 +283,7 @@ module spatz_controller
 
     // Nobody wrote to the VRF yet
     wrote_result_d = '0;
+    read_result_d = '0;
     sb_enable_o    = '0;
 
 `ifdef DOUBLE_BW
@@ -286,6 +292,17 @@ module spatz_controller
     vl_cnt_d             = vl_cnt_q;
     vl_max_d             = vl_max_q;
 `endif
+    for (int unsigned port = 0; port < NrVregfilePorts; port++)
+      // Enable the VRF port if the dependant instructions wrote in the previous cycle
+      // sb_enable_o[port] = sb_enable_i[port] && &(~scoreboard_q[sb_id_i[port]].deps | wrote_result_q) && (!(|scoreboard_q[sb_id_i[port]].deps) || !scoreboard_q[sb_id_i[port]].prevent_chaining);
+
+      if (port < SB_VFU_VD_WD)
+        sb_enable_o[port] = sb_enable_i[port] &&
+                &(~scoreboard_q[sb_id_i[port]].deps | wrote_result_q) &&
+                (!(|scoreboard_q[sb_id_i[port]].deps) || !scoreboard_q[sb_id_i[port]].prevent_chaining);
+      else sb_enable_o[port] = sb_enable_i[port] &&
+                &(~scoreboard_q[sb_id_i[port]].deps | read_result_q) &&
+                (!(|scoreboard_q[sb_id_i[port]].deps) || !scoreboard_q[sb_id_i[port]].prevent_chaining);
 
     for (int unsigned port = 0; port < NrVregfilePorts; port++) begin
 `ifdef DOUBLE_BW
@@ -346,6 +363,22 @@ module spatz_controller
       end
     end
 `endif
+
+    if (sb_enable_o[SB_VFU_VS1_RD]) begin
+      read_result_d[sb_id_i[SB_VFU_VS1_RD]] = sb_read_result_i[SB_VFU_VS1_RD - SB_VFU_VS1_RD];
+    end
+    if (sb_enable_o[SB_VFU_VS2_RD]) begin
+      read_result_d[sb_id_i[SB_VFU_VS2_RD]] = sb_read_result_i[SB_VFU_VS2_RD - SB_VFU_VS1_RD];
+    end
+    if (sb_enable_o[SB_VFU_VD_RD]) begin
+      read_result_d[sb_id_i[SB_VFU_VD_RD]] = sb_read_result_i[SB_VFU_VD_RD - SB_VFU_VS1_RD];
+    end
+    if (sb_enable_o[SB_VLSU_VS2_RD]) begin
+      read_result_d[sb_id_i[SB_VLSU_VS2_RD]] = sb_read_result_i[SB_VLSU_VS2_RD - SB_VFU_VS1_RD];
+    end
+    if (sb_enable_o[SB_VSLDU_VS2_RD]) begin
+      read_result_d[sb_id_i[SB_VSLDU_VS2_RD]] = sb_read_result_i[SB_VSLDU_VS2_RD - SB_VFU_VS1_RD];
+    end
 
     // A unit has finished its VRF access. Reset the scoreboard. For each instruction, check
     // if a dependency existed. If so, invalidate it.
@@ -473,11 +506,12 @@ module spatz_controller
   // not ready yet. Or we have a change in LMUL, for which we need to let all the
   // units finish first before scheduling a new operation (to avoid running into
   // issues with the socreboard).
-  logic stall, vfu_stall, vlsu_stall, vsldu_stall;
-  assign stall       = (vfu_stall | vlsu_stall | vsldu_stall) & req_buffer_valid;
+  logic stall, vfu_stall, vlsu_stall, vsldu_stall, core_stall;
+  assign stall       = (vfu_stall | vlsu_stall | vsldu_stall | core_stall) & req_buffer_valid;
   assign vfu_stall   = ~vfu_req_ready_i & (spatz_req.ex_unit == VFU);
   assign vlsu_stall  = ~vlsu_req_ready_i & (spatz_req.ex_unit == LSU);
   assign vsldu_stall = ~vsldu_req_ready_i & (spatz_req.ex_unit == SLD);
+
 
   // Running instructions
   logic      [NrParallelInstructions-1:0] running_insn_d, running_insn_q;
@@ -550,6 +584,8 @@ module spatz_controller
     end
   end // ex_issue
 
+  
+
   always_comb begin: proc_next_insn_id
     // Maintain state
     running_insn_d = running_insn_q;
@@ -566,6 +602,9 @@ module spatz_controller
     if (vsldu_rsp_valid_i)
       running_insn_d[vsldu_rsp_i.id] = 1'b0;
   end: proc_next_insn_id
+
+
+  assign running_instrs_o = |running_insn_q;
 
   // Respond to core about the decoded instruction.
   always_comb begin : acc_issue_resp
@@ -635,12 +674,14 @@ module spatz_controller
   logic       rsp_valid_d;
   logic       rsp_ready_d;
   spatz_rsp_t rsp_d;
-  spill_register #(
-    .T     (spatz_rsp_t ),
-    .Bypass(!RegisterRsp)
+
+  fall_through_register #(
+    .T     (spatz_rsp_t )
   ) i_spatz_rsp_register (
     .clk_i  (clk_i       ),
     .rst_ni (rst_ni      ),
+    .clr_i ('0),
+    .testmode_i ('0),
     .data_i (rsp_d       ),
     .valid_i(rsp_valid_d ),
     .ready_o(rsp_ready_d ),
@@ -648,6 +689,8 @@ module spatz_controller
     .valid_o(rsp_valid_o ),
     .ready_i(rsp_ready_i )
   );
+
+  assign core_stall = rsp_valid_d & ~rsp_ready_d;
 
   // Retire an operation/instruction and write back result to core
   // if necessary.

@@ -10,11 +10,11 @@ set -e
 
 [ ! -z "$VSIM" ] || VSIM=vsim
 
-bender script vsim -t test \
+$SN_BENDER script vsim -t test \
     --vlog-arg="-svinputport=compat" \
     --vlog-arg="-override_timescale 1ns/1ps" \
     --vlog-arg="-suppress 2583" \
     --vlog-arg="+cover=sbecft" \
     > compile.tcl
 echo 'return 0' >> compile.tcl
-$VSIM -c -do 'exit -code [source compile.tcl]'
+$QUESTA_SEPP $VSIM -c -do 'exit -code [source compile.tcl]'

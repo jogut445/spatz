@@ -303,7 +303,8 @@ module axi_to_reqrsp #(
     // Silence those channels in case of a read.
     data: data & {DataWidth{meta.write}},
     strb: axi_req_i.w.strb & {StrbWidth{meta.write}},
-    size: meta.size
+    size: meta.size,
+    default: '0
   };
 
   always_comb begin
@@ -371,12 +372,12 @@ module axi_to_reqrsp #(
   };
 
   // Registers
-  `FFARN(meta_sel_q, meta_sel_d, 1'b0, clk_i, rst_ni)
-  `FFARN(sel_lock_q, sel_lock_d, 1'b0, clk_i, rst_ni)
-  `FFARN(rd_meta_q, rd_meta_d, meta_t'{default: '0}, clk_i, rst_ni)
-  `FFARN(wr_meta_q, wr_meta_d, meta_t'{default: '0}, clk_i, rst_ni)
-  `FFARN(r_cnt_q, r_cnt_d, '0, clk_i, rst_ni)
-  `FFARN(w_cnt_q, w_cnt_d, '0, clk_i, rst_ni)
+  `FF(meta_sel_q, meta_sel_d, 1'b0, clk_i, rst_ni)
+  `FF(sel_lock_q, sel_lock_d, 1'b0, clk_i, rst_ni)
+  `FF(rd_meta_q, rd_meta_d, meta_t'{default: '0}, clk_i, rst_ni)
+  `FF(wr_meta_q, wr_meta_d, meta_t'{default: '0}, clk_i, rst_ni)
+  `FF(r_cnt_q, r_cnt_d, '0, clk_i, rst_ni)
+  `FF(w_cnt_q, w_cnt_d, '0, clk_i, rst_ni)
 
   // Assertions
   // Make sure that write is never set for AMOs.
@@ -447,7 +448,7 @@ module axi_to_reqrsp_intf #(
   typedef logic [IdWidth-1:0] id_t;
   typedef logic [UserWidth-1:0] user_t;
 
-  `REQRSP_TYPEDEF_ALL(reqrsp, addr_t, data_t, strb_t)
+  `REQRSP_TYPEDEF_ALL(reqrsp, addr_t, data_t, strb_t, user_t)
 
   `AXI_TYPEDEF_AW_CHAN_T(aw_chan_t, addr_t, id_t, user_t)
   `AXI_TYPEDEF_W_CHAN_T(w_chan_t, data_t, strb_t, user_t)

@@ -58,11 +58,10 @@ module reqrsp_to_axi_tb import reqrsp_pkg::*; #(
     .AxiIdWidth (IW),
     .AddrWidth (AW),
     .DataWidth (DW),
-    .AxiUserWidth (UW)
+    .UserWidth (UW)
   ) i_reqrsp_to_axi (
     .clk_i (clk),
     .rst_ni (rst_n),
-    .user_i ('0),
     .reqrsp (master),
     .axi (slave)
   );
@@ -135,8 +134,8 @@ module reqrsp_to_axi_tb import reqrsp_pkg::*; #(
       reqrsp_monitor.req_mbx.get(req);
       // check fields match
       // Writes and atomics.
-      // For each write the reqrsp bus we want to see a `aw` beat.
-      if (req.write) begin
+      // For each "AXI" write (i.e. incl. ATOPs) on the reqrsp bus we want to see a `aw` beat.
+      if (req.write | is_amo(req.amo) | (req.amo == AMOSC)) begin
         axi_monitor.aw_mbx.get(ax);
         axi_monitor.w_mbx.get(w);
 
