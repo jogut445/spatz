@@ -33,6 +33,7 @@ add_snitch_test(vadd  isa/rv64uv/vadd.c)
 add_snitch_test(vsub  isa/rv64uv/vsub.c)
 add_snitch_test(vrsub isa/rv64uv/vrsub.c)
 
+add_snitch_test(vls    isa/rv64uv/vls.c)
 add_snitch_test(vloxei isa/rv64uv/vloxei.c)
 add_snitch_test(vsuxei isa/rv64uv/vsuxei.c)
 
@@ -138,3 +139,6 @@ add_snitch_test(vfcvt  isa/rv64uv/vfcvt.c)
 add_snitch_test(vfncvt isa/rv64uv/vfncvt.c)
 
 add_snitch_test(vfmv isa/rv64uv/vfmv.c)
+
+add_snitch_test(invalid isa/rv64uv/invalid.c)
+set_property(TEST ${SNITCH_TEST_PREFIX}rtl-invalid PROPERTY WILL_FAIL TRUE)

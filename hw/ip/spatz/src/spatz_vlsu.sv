@@ -79,6 +79,8 @@ module spatz_vlsu
   logic       mem_spatz_req_valid;
   logic       mem_spatz_req_ready;
 
+  logic spatz_req_ready;
+
   spill_register #(
     .T(spatz_req_t)
   ) i_operation_queue (
@@ -86,7 +88,7 @@ module spatz_vlsu
     .rst_ni (rst_ni                                         ),
     .data_i (spatz_req_d                                    ),
     .valid_i(spatz_req_valid_i && spatz_req_i.ex_unit == LSU),
-    .ready_o(spatz_req_ready_o                              ),
+    .ready_o(spatz_req_ready                                ),
     .data_o (mem_spatz_req                                  ),
     .valid_o(mem_spatz_req_valid                            ),
     .ready_i(mem_spatz_req_ready                            )
@@ -291,6 +293,9 @@ module spatz_vlsu
   logic [NrParallelInstructions-1:0] mem_insn_pending_q, mem_insn_pending_d;
   `FF(mem_insn_pending_q, mem_insn_pending_d, '0)
 
+  // Is there are pending write request to be sent to the memory
+  logic write_pending;
+
   ///////////////////
   //  VRF request  //
   ///////////////////
@@ -314,7 +319,7 @@ module spatz_vlsu
   logic             commit_insn_push;
   commit_metadata_t commit_insn_q;
   logic             commit_insn_pop;
-  logic             commit_insn_empty;
+  logic             commit_insn_empty, commit_insn_full;
   logic             commit_insn_valid;
 
   fifo_v3 #(
@@ -328,7 +333,7 @@ module spatz_vlsu
     .testmode_i(1'b0             ),
     .data_i    (commit_insn_d    ),
     .push_i    (commit_insn_push ),
-    .full_o    (/* Unused */     ),
+    .full_o    (commit_insn_full ),
     .data_o    (commit_insn_q    ),
     .empty_o   (commit_insn_empty),
     .pop_i     (commit_insn_pop  ),
@@ -348,6 +353,8 @@ module spatz_vlsu
       is_indexed: mem_is_indexed
   };
 
+  assign spatz_req_ready_o = spatz_req_ready & !commit_insn_full;
+
   always_comb begin: queue_control
     // Maintain state
     mem_insn_finished_d = mem_insn_finished_q;
@@ -360,13 +367,13 @@ module spatz_vlsu
     commit_insn_push = 1'b0;
 
     // Did we start a new instruction?
-    if (mem_spatz_req_valid && !mem_insn_pending_q[mem_spatz_req.id]) begin
+    if (mem_spatz_req_valid && !mem_insn_pending_q[mem_spatz_req.id] && !commit_insn_full) begin
       mem_insn_pending_d[mem_spatz_req.id] = 1'b1;
       commit_insn_push                     = 1'b1;
     end
 
     // Did an instruction finished its requests?
-    if (&mem_port_finished_q) begin
+    if (&mem_port_finished_q & !write_pending) begin
       mem_insn_finished_d[mem_spatz_req.id] = 1'b1;
       mem_spatz_req_ready                   = 1'b1;
     end
@@ -722,6 +729,11 @@ module spatz_vlsu
   always_comb begin: p_state
     // Maintain state
     state_d = state_q;
+    write_pending = 1'b0;
+
+    for (int port = 0; port < NrMemPorts; port++) begin
+      write_pending |= (spatz_mem_req_o[port].write & spatz_mem_req_valid_o[port]);
+    end
 
     unique case (state_q)
       VLSU_RunningLoad: begin
@@ -733,7 +745,8 @@ module spatz_vlsu
       VLSU_RunningStore: begin
         if (commit_insn_valid && commit_insn_q.is_load)
           if (&rob_empty)
-            state_d = VLSU_RunningLoad;
+            if (!write_pending)
+              state_d = VLSU_RunningLoad;
       end
 
       default:;
